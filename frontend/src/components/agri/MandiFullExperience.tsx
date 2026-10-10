@@ -9,7 +9,6 @@ import {
   TrendingUp, 
   TrendingDown, 
   Minus, 
-  Search, 
   ShieldCheck, 
   Info, 
   MapPin, 
@@ -49,7 +48,6 @@ export const MandiFullExperience: React.FC<MandiFullExperienceProps> = ({
 }) => {
   const t = translations[currentLang];
   const [activeMarketView, setActiveMarketView] = useState<'mandi' | 'buyers'>('mandi');
-  const [searchQuery, setSearchQuery] = useState('');
   const [selectedMarketName, setSelectedMarketName] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<'highest' | 'lowest' | 'recent'>('highest');
   
@@ -165,24 +163,12 @@ export const MandiFullExperience: React.FC<MandiFullExperienceProps> = ({
     return farmerCropDetails.find(c => isCommodityMatching(c.name, selectedCrop));
   }, [farmerCropDetails, selectedCrop]);
 
-  // Filter markets for current selected crop and search
+  // Filter markets for current selected crop
   const filteredMarketsForCrop = useMemo(() => {
-    const cropMatches = markets.filter(m => 
+    return markets.filter(m => 
       isCommodityMatching(selectedCrop, m.commodity)
     );
-
-    if (!searchQuery.trim()) return cropMatches;
-
-    const q = searchQuery.toLowerCase().trim();
-    return markets.filter(m => {
-      const matchSearch = 
-        m.commodity.toLowerCase().includes(q) || 
-        m.marketName.toLowerCase().includes(q) || 
-        m.district.toLowerCase().includes(q) ||
-        (m.variety && m.variety.toLowerCase().includes(q));
-      return matchSearch;
-    });
-  }, [markets, selectedCrop, searchQuery]);
+  }, [markets, selectedCrop]);
 
   // Resolve active market record
   const activeMarket = useMemo(() => {
@@ -631,27 +617,6 @@ export const MandiFullExperience: React.FC<MandiFullExperienceProps> = ({
               </span>
             </div>
           )}
-        </div>
-
-        {/* Search Input */}
-        <div style={{ position: 'relative', minWidth: '240px', flex: '1 1 220px', maxWidth: '340px' }}>
-          <Search size={16} color="var(--ag-color-text-secondary)" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
-          <input
-            type="text"
-            placeholder={t.searchCropPlaceholder}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            style={{
-              width: '100%',
-              padding: '11px 12px 11px 38px',
-              borderRadius: 'var(--ag-radius-md)',
-              border: '1px solid var(--ag-border-default)',
-              fontSize: '13px',
-              backgroundColor: '#FFFFFF',
-              color: 'var(--ag-color-text-primary)',
-              boxSizing: 'border-box',
-            }}
-          />
         </div>
       </div>
 
