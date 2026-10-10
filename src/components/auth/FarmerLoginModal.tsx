@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import type { Language, FarmerProfile } from '../../types';
 import { translations } from '../../i18n/translations';
 import { FarmService } from '../../services/farm/farmService';
@@ -13,7 +13,10 @@ import {
   RefreshCw, 
   UserCheck, 
   X,
-  Volume2
+  Volume2,
+  User,
+  LogOut,
+  MapPin
 } from 'lucide-react';
 
 interface FarmerLoginModalProps {
@@ -23,6 +26,8 @@ interface FarmerLoginModalProps {
   onLoginSuccess?: (profile: FarmerProfile) => void;
   onSuccess?: (profile: FarmerProfile) => void;
   initialPhone?: string;
+  activeProfile?: FarmerProfile | null;
+  onSwitchFarmer?: () => void;
 }
 
 export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
@@ -32,22 +37,39 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
   onLoginSuccess,
   onSuccess,
   initialPhone = '',
+  activeProfile = null,
+  onSwitchFarmer,
 }) => {
   const t = translations[currentLang];
-  const [phoneNumber, setPhoneNumber] = useState<string>(initialPhone);
-  const [step, setStep] = useState<'input' | 'confirm' | 'success'>('input');
+  const [phoneNumber, setPhoneNumber] = useState<string>(initialPhone || activeProfile?.phone || '');
+  const [farmerNameInput, setFarmerNameInput] = useState<string>('');
+  const [step, setStep] = useState<'view_profile' | 'input' | 'confirm' | 'name_input' | 'success'>(
+    activeProfile?.phone ? 'view_profile' : 'input'
+  );
+  
   const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [isRecordingName, setIsRecordingName] = useState<boolean>(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState<boolean>(false);
-  const [confirmedProfile, setConfirmedProfile] = useState<FarmerProfile | null>(null);
+  const [confirmedProfile, setConfirmedProfile] = useState<FarmerProfile | null>(activeProfile);
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
+  useEffect(() => {
+    if (activeProfile?.phone) {
+      setStep('view_profile');
+      setPhoneNumber(activeProfile.phone);
+      setConfirmedProfile(activeProfile);
+    } else {
+      setStep('input');
+    }
+  }, [activeProfile, isOpen]);
+
   if (!isOpen) return null;
 
-  const handleStartVoiceInput = async () => {
+  const handleStartVoiceInput = async (mode: 'phone' | 'name') => {
     setErrorMsg('');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -64,21 +86,29 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
       mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         stream.getTracks().forEach(track => track.stop());
-        await processVoiceNumber(audioBlob);
+        if (mode === 'phone') {
+          await processVoiceNumber(audioBlob);
+        } else {
+          await processVoiceName(audioBlob);
+        }
       };
 
       mediaRecorder.start();
-      setIsRecording(true);
+      if (mode === 'phone') setIsRecording(true);
+      else setIsRecordingName(true);
     } catch (err: any) {
       console.error('[FarmerLogin] Mic permission error:', err);
       setErrorMsg('Microphone access denied or unavailable.');
     }
   };
 
-  const handleStopVoiceInput = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
+  const handleStopVoiceInput = (mode: 'phone' | 'name') => {
+    if (mediaRecorderRef.current) {
+      if (mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      if (mode === 'phone') setIsRecording(false);
+      else setIsRecordingName(false);
     }
   };
 
@@ -96,7 +126,6 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
 
       if (res.success && res.data?.text) {
         const transcript = res.data.text;
-        // Extract 10 digits from speech
         const digits = transcript.replace(/\D/g, '');
         if (digits.length >= 10) {
           const tenDigits = digits.slice(-10);
@@ -113,6 +142,33 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
     } catch (err: any) {
       console.warn('[FarmerLogin] Voice transcription notice:', err.message);
       setErrorMsg('Voice transcription temporarily unavailable. Please type your number.');
+    } finally {
+      setIsProcessingVoice(false);
+    }
+  };
+
+  const processVoiceName = async (blob: Blob) => {
+    setIsProcessingVoice(true);
+    try {
+      const formData = new FormData();
+      formData.append('audio', blob, 'name_input.webm');
+      formData.append('language', currentLang);
+
+      const res = await fetchApi<{ text: string }>('/voice/transcribe', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (res.success && res.data?.text) {
+        const cleanName = res.data.text.replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, '').trim();
+        if (cleanName) {
+          setFarmerNameInput(cleanName);
+          const feedback = currentLang === 'te' ? `మీ పేరు: ${cleanName}` : (currentLang === 'hi' ? `आपका नाम: ${cleanName}` : `You said: ${cleanName}`);
+          SpeechService.speak(feedback, currentLang);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[FarmerLogin] Name voice notice:', err.message);
     } finally {
       setIsProcessingVoice(false);
     }
@@ -148,23 +204,19 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
       const profile = await FarmService.identifySession(phoneNumber, currentLang);
       if (profile) {
         setConfirmedProfile(profile);
-        setStep('success');
         if (profile.phone) {
           localStorage.setItem('agriguide_farmer_phone', profile.phone);
         }
         localStorage.setItem('agriguide_farmer_profile', JSON.stringify(profile));
         
-        const successSpeech = currentLang === 'te' 
-          ? `మొబైల్ నంబర్ నిర్ధారించబడింది. నమస్కారం!` 
-          : currentLang === 'hi' 
-          ? `मोबाइल नंबर की पुष्टि हो गई। स्वागत है!` 
-          : `Mobile number confirmed. Welcome to AgriGuide!`;
-        SpeechService.speak(successSpeech, currentLang);
-
-        setTimeout(() => {
-          (onSuccess || onLoginSuccess)?.(profile);
-          onClose();
-        }, 1200);
+        // If profile is new or has no custom name, prompt for farmer name
+        if (!profile.fullName || profile.fullName === 'Farmer' || profile.isNewUser) {
+          setStep('name_input');
+          const namePrompt = currentLang === 'te' ? 'మీ పేరు చెప్పండి లేదా టైప్ చేయండి' : (currentLang === 'hi' ? 'कृपया अपना नाम बताएं या टाइप करें' : 'What is your name?');
+          SpeechService.speak(namePrompt, currentLang);
+        } else {
+          finishSessionConfirmation(profile);
+        }
       } else {
         setErrorMsg('Failed to confirm session. Please try again.');
       }
@@ -173,6 +225,55 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSaveFarmerName = async () => {
+    const trimmedName = farmerNameInput.trim();
+    const finalName = trimmedName || confirmedProfile?.fullName || 'Farmer';
+
+    setLoading(true);
+    try {
+      if (trimmedName && confirmedProfile?.id) {
+        const updated = await FarmService.updateFarmerProfile({ fullName: finalName });
+        if (updated) {
+          setConfirmedProfile(updated);
+          localStorage.setItem('agriguide_farmer_profile', JSON.stringify(updated));
+          finishSessionConfirmation(updated);
+          return;
+        }
+      }
+      finishSessionConfirmation(confirmedProfile || { phone: phoneNumber, fullName: finalName });
+    } catch (err: any) {
+      console.warn('[FarmerLogin] Name save warning:', err.message);
+      finishSessionConfirmation(confirmedProfile || { phone: phoneNumber, fullName: finalName });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const finishSessionConfirmation = (profile: FarmerProfile) => {
+    setStep('success');
+    const successSpeech = currentLang === 'te' 
+      ? `మొబైల్ నంబర్ నిర్ధారించబడింది. నమస్కారం!` 
+      : currentLang === 'hi' 
+      ? `मोबाइल नंबर की पुष्टि हो गई। स्वागत है!` 
+      : `Mobile number confirmed. Welcome to AgriGuide!`;
+    SpeechService.speak(successSpeech, currentLang);
+
+    setTimeout(() => {
+      (onSuccess || onLoginSuccess)?.(profile);
+      onClose();
+    }, 1200);
+  };
+
+  const handleSwitchFarmerTrigger = () => {
+    localStorage.removeItem('agriguide_farmer_phone');
+    localStorage.removeItem('agriguide_farmer_profile');
+    setPhoneNumber('');
+    setConfirmedProfile(null);
+    setFarmerNameInput('');
+    setStep('input');
+    onSwitchFarmer?.();
   };
 
   return (
@@ -220,10 +321,10 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
               justifyContent: 'center',
               color: 'var(--ag-color-primary-base)',
             }}>
-              <Phone size={18} />
+              {step === 'view_profile' ? <User size={18} /> : <Phone size={18} />}
             </div>
             <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
-              {t.welcomeToAgriGuide}
+              {step === 'view_profile' ? (t.farmerProfile || 'Farmer Profile') : (t.welcomeToAgriGuide || 'Welcome to AgriGuide')}
             </h3>
           </div>
           <button
@@ -242,15 +343,103 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
 
         {/* Content */}
         <div style={{ padding: '24px' }}>
+          {/* 1. View Active Profile & Switch Farmer Screen */}
+          {step === 'view_profile' && confirmedProfile && (
+            <div>
+              <div style={{
+                backgroundColor: '#FAFBF7',
+                borderRadius: '12px',
+                border: '1px solid var(--ag-border-default)',
+                padding: '16px',
+                marginBottom: '20px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                  <div style={{
+                    width: '44px',
+                    height: '44px',
+                    borderRadius: '50%',
+                    backgroundColor: 'var(--ag-color-primary-light)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--ag-color-primary-base)',
+                  }}>
+                    <User size={24} />
+                  </div>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
+                      {confirmedProfile.fullName || 'Farmer'}
+                    </h4>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '13px', color: 'var(--ag-color-text-secondary)' }}>
+                      +91 {confirmedProfile.phone}
+                    </p>
+                  </div>
+                </div>
+
+                <div style={{ borderTop: '1px solid #E2E8F0', paddingTop: '10px', fontSize: '12px', color: 'var(--ag-color-text-secondary)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <MapPin size={12} color="var(--ag-color-primary-base)" />
+                    <span>{confirmedProfile.village ? `${confirmedProfile.village}, ` : ''}{confirmedProfile.district || 'Warangal'}, {confirmedProfile.state || 'Telangana'}</span>
+                  </div>
+                  <div>
+                    Language: <strong>{confirmedProfile.preferredLanguage === 'te' ? 'తెలుగు (Telugu)' : (confirmedProfile.preferredLanguage === 'hi' ? 'हिन्दी (Hindi)' : 'English')}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  style={{
+                    backgroundColor: 'var(--ag-color-primary-base)',
+                    color: '#FFFFFF',
+                    border: 'none',
+                    padding: '12px',
+                    borderRadius: 'var(--ag-radius-full)',
+                    fontSize: '14px',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Continue
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSwitchFarmerTrigger}
+                  style={{
+                    backgroundColor: 'transparent',
+                    color: 'var(--ag-color-danger-base)',
+                    border: '1px solid #F7B5B3',
+                    padding: '10px',
+                    borderRadius: 'var(--ag-radius-full)',
+                    fontSize: '13px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                  }}
+                >
+                  <LogOut size={15} />
+                  <span>Switch Farmer / Sign in with another number</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 2. Mobile Input Screen */}
           {step === 'input' && (
             <div>
               <p style={{ fontSize: '14px', color: 'var(--ag-color-text-secondary)', margin: '0 0 20px 0', lineHeight: 1.5 }}>
-                {t.enterMobileNumber}
+                {t.enterMobileNumber || 'Enter your 10-digit mobile number to access your farm workspace.'}
               </p>
 
               <form onSubmit={handleManualSubmit}>
                 <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-primary)', marginBottom: '8px', textTransform: 'uppercase' }}>
-                  {t.enterMobileNumber}
+                  {t.enterMobileNumber || 'Mobile Number'}
                 </label>
                 <div style={{
                   display: 'flex',
@@ -309,7 +498,7 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
                     marginBottom: '16px',
                   }}
                 >
-                  <span>{t.confirm}</span>
+                  <span>{t.confirm || 'Confirm Mobile Number'}</span>
                   <ArrowRight size={18} />
                 </button>
               </form>
@@ -321,11 +510,11 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
                 textAlign: 'center',
               }}>
                 <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '10px' }}>
-                  {t.sayMobileNumber}
+                  {t.sayMobileNumber || 'Or Speak Your Number'}
                 </p>
                 <button
                   type="button"
-                  onClick={isRecording ? handleStopVoiceInput : handleStartVoiceInput}
+                  onClick={isRecording ? () => handleStopVoiceInput('phone') : () => handleStartVoiceInput('phone')}
                   disabled={isProcessingVoice}
                   style={{
                     display: 'inline-flex',
@@ -345,20 +534,21 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
                   {isRecording ? <Square size={16} fill="currentColor" /> : <Mic size={16} />}
                   <span>
                     {isProcessingVoice 
-                      ? t.voiceProcessing 
+                      ? (t.voiceProcessing || 'Processing audio...')
                       : isRecording 
-                      ? t.voiceListening 
-                      : `🎙 ${t.sayMobileNumber}`}
+                      ? (t.voiceListening || 'Listening...') 
+                      : `🎙 ${t.sayMobileNumber || 'Speak Number'}`}
                   </span>
                 </button>
               </div>
             </div>
           )}
 
+          {/* 3. Confirm Mobile Number Screen */}
           {step === 'confirm' && (
             <div style={{ textAlign: 'center' }}>
               <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase' }}>
-                {t.youEntered}
+                {t.youEntered || 'You entered'}
               </span>
               <div style={{
                 fontSize: '28px',
@@ -370,7 +560,7 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
                 +91 {phoneNumber}
               </div>
               <p style={{ fontSize: '15px', fontWeight: 700, color: 'var(--ag-color-text-primary)', margin: '0 0 24px 0' }}>
-                {t.isThisYourNumber}
+                {t.isThisYourNumber || 'Is this your mobile number?'}
               </p>
 
               {errorMsg && (
@@ -402,7 +592,7 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
                   }}
                 >
                   <Check size={18} />
-                  <span>{loading ? 'Confirming...' : t.yesContinue}</span>
+                  <span>{loading ? 'Confirming...' : (t.yesContinue || 'Yes, Confirm')}</span>
                 </button>
 
                 <button
@@ -426,7 +616,7 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
                   }}
                 >
                   <RefreshCw size={15} />
-                  <span>{t.changeNumber}</span>
+                  <span>{t.changeNumber || 'Change Number'}</span>
                 </button>
               </div>
 
@@ -447,12 +637,100 @@ export const FarmerLoginModal: React.FC<FarmerLoginModalProps> = ({
                   }}
                 >
                   <Volume2 size={14} />
-                  <span>{t.listen}</span>
+                  <span>{t.listen || 'Listen'}</span>
                 </button>
               </div>
             </div>
           )}
 
+          {/* 4. Farmer Name Collection (One-time personalization) */}
+          {step === 'name_input' && (
+            <div>
+              <h4 style={{ fontSize: '18px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: '0 0 6px 0' }}>
+                {currentLang === 'te' ? 'మీ పేరు ఏమిటి?' : (currentLang === 'hi' ? 'आपका नाम क्या है?' : "What's your name?")}
+              </h4>
+              <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', margin: '0 0 16px 0' }}>
+                {currentLang === 'te' ? 'వ్యక్తిగతీకరించిన వ్యవసాయ సలహాల కోసం మీ పేరు నమోదు చేయండి.' : 'Enter your name to personalize your AgriGuide workspace.'}
+              </p>
+
+              <div style={{ marginBottom: '14px' }}>
+                <input
+                  type="text"
+                  value={farmerNameInput}
+                  onChange={(e) => setFarmerNameInput(e.target.value)}
+                  placeholder={currentLang === 'te' ? 'ఉదా: రమేష్' : (currentLang === 'hi' ? 'उदा: रमेश' : 'e.g. Ramesh')}
+                  style={{
+                    width: '100%',
+                    padding: '12px 14px',
+                    borderRadius: '12px',
+                    border: '2px solid var(--ag-border-default)',
+                    fontSize: '16px',
+                    fontWeight: 700,
+                    color: 'var(--ag-color-text-primary)',
+                    boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+
+              {farmerNameInput && (
+                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--ag-color-primary-dark)', marginBottom: '12px' }}>
+                  {currentLang === 'te' ? `మీరు చెప్పారు: ${farmerNameInput}` : `You entered: ${farmerNameInput}`}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={handleSaveFarmerName}
+                  disabled={loading}
+                  style={{
+                    backgroundColor: 'var(--ag-color-primary-base)',
+                    color: '#FFFFFF',
+                    border: 'none',
+                    padding: '12px',
+                    borderRadius: 'var(--ag-radius-full)',
+                    fontSize: '15px',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    minHeight: '48px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
+                  }}
+                >
+                  <Check size={18} />
+                  <span>{loading ? 'Saving...' : (t.confirm || 'Confirm')}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={isRecordingName ? () => handleStopVoiceInput('name') : () => handleStartVoiceInput('name')}
+                  disabled={isProcessingVoice}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
+                    backgroundColor: isRecordingName ? '#FDF0F0' : 'var(--ag-color-harvest-light)',
+                    color: isRecordingName ? 'var(--ag-color-danger-base)' : 'var(--ag-color-warning-base)',
+                    border: `1px solid ${isRecordingName ? '#F7B5B3' : '#FAD48C'}`,
+                    padding: '10px',
+                    borderRadius: 'var(--ag-radius-full)',
+                    fontSize: '13px',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    minHeight: '44px',
+                  }}
+                >
+                  {isRecordingName ? <Square size={15} fill="currentColor" /> : <Mic size={15} />}
+                  <span>{isRecordingName ? 'Listening to name...' : '🎙 Speak Your Name'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 5. Success Screen */}
           {step === 'success' && (
             <div style={{ textAlign: 'center', padding: '16px 0' }}>
               <div style={{

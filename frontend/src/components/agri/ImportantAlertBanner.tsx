@@ -1,6 +1,7 @@
 import React from 'react';
 import type { AlertNotification, Language } from '../../types';
 import { translations } from '../../i18n/translations';
+import { localizeAlert } from '../../i18n/agriLocalization';
 import { AlertTriangle, ChevronRight } from 'lucide-react';
 
 interface ImportantAlertBannerProps {
@@ -19,11 +20,13 @@ export const ImportantAlertBanner: React.FC<ImportantAlertBannerProps> = ({
   const t = translations[currentLang];
   
   // Only display if there is an actual high priority / warning alert
-  const primaryAlert = alerts.find(a => a.severity === 'warning' || a.severity === 'danger') || alerts[0];
+  const rawAlert = alerts.find(a => a.severity === 'warning' || a.severity === 'danger') || alerts[0];
 
-  if (!primaryAlert) {
+  if (!rawAlert) {
     return null; // Return null if no important alert exists (No fake cards)
   }
+
+  const primaryAlert = localizeAlert(rawAlert, currentLang);
 
   return (
     <div

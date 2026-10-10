@@ -2,6 +2,7 @@ import React from 'react';
 import type { WeatherData, Language } from '../../types';
 import { translations } from '../../i18n/translations';
 import { CacheService } from '../../services/cacheService';
+import { localizeWeather } from '../../i18n/agriLocalization';
 import { Sun, CloudRain, Wind, Droplets, ShieldCheck, AlertCircle, ShieldAlert } from 'lucide-react';
 
 interface WeatherAdvisoryCardProps {
@@ -9,17 +10,20 @@ interface WeatherAdvisoryCardProps {
   loading: boolean;
   error: string | null;
   currentLang: Language;
+  onOpen7DayForecast?: () => void;
   style?: React.CSSProperties;
 }
 
 export const WeatherAdvisoryCard: React.FC<WeatherAdvisoryCardProps> = ({
-  weather,
+  weather: rawWeather,
   loading,
   error,
   currentLang,
+  onOpen7DayForecast,
   style,
 }) => {
   const t = translations[currentLang];
+  const weather = localizeWeather(rawWeather, currentLang);
 
   if (loading) {
     return (
@@ -223,6 +227,32 @@ export const WeatherAdvisoryCard: React.FC<WeatherAdvisoryCardProps> = ({
           }}>
             {weather.advisoryText}
           </p>
+
+          {/* View 7-Day Forecast Button */}
+          {onOpen7DayForecast && (
+            <button
+              onClick={onOpen7DayForecast}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                padding: '8px 14px',
+                backgroundColor: 'var(--ag-color-weather-light)',
+                color: 'var(--ag-color-weather-base)',
+                border: '1px solid #BAE6FD',
+                borderRadius: 'var(--ag-radius-md)',
+                fontSize: '12px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                minHeight: '38px',
+                marginBottom: '4px',
+              }}
+            >
+              <span>{t.view7DayForecast} →</span>
+            </button>
+          )}
         </div>
 
         {/* Source & Freshness Metadata */}

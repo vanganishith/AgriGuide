@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Language, NavTab } from '../../types';
 import { translations } from '../../i18n/translations';
-import { Home, CloudSun, Stethoscope, Store } from 'lucide-react';
+import { Stethoscope, Sprout, Store, Landmark } from 'lucide-react';
 
 export type { NavTab };
 
@@ -19,10 +19,10 @@ export const BottomNavigation: React.FC<BottomNavigationProps> = ({
   const t = translations[currentLang];
 
   const tabs: { id: NavTab; label: string; icon: React.ReactNode }[] = [
-    { id: 'home', label: t.navHome, icon: <Home size={22} /> },
-    { id: 'weather', label: t.navWeather, icon: <CloudSun size={22} /> },
-    { id: 'doctor', label: t.navDoctor, icon: <Stethoscope size={22} /> },
-    { id: 'mandi', label: t.navMandi, icon: <Store size={22} /> },
+    { id: 'doctor', label: t.navCropDoctor, icon: <Stethoscope size={20} /> },
+    { id: 'farm', label: t.navMyFarm, icon: <Sprout size={20} /> },
+    { id: 'mandi', label: t.navMandi, icon: <Store size={20} /> },
+    { id: 'money', label: t.navMoney, icon: <Landmark size={20} /> },
   ];
 
   return (

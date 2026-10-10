@@ -220,4 +220,71 @@ export class FarmService {
     }
     throw new Error(res.error?.message || 'Failed to start crop');
   }
+
+  /**
+   * Fetch all recommendations/daily activities for current farmer from Supabase
+   */
+  static async getRecommendations(): Promise<any[]> {
+    try {
+      const res = await fetchApi<any[]>('/farm/recommendations');
+      if (res.success && Array.isArray(res.data)) {
+        return res.data;
+      }
+      return [];
+    } catch (err: any) {
+      console.warn('[FarmService] Error fetching recommendations:', err.message);
+      return [];
+    }
+  }
+
+  /**
+   * Mark or toggle recommendation completed state
+   */
+  static async completeRecommendation(id: string, isCompleted = true): Promise<boolean> {
+    try {
+      const res = await fetchApi<any>(`/farm/recommendations/${id}/complete`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isCompleted }),
+      });
+      return Boolean(res.success);
+    } catch (err: any) {
+      console.warn('[FarmService] Error completing recommendation:', err.message);
+      return false;
+    }
+  }
+
+  /**
+   * Fetch current farmer profile from backend
+   */
+  static async getFarmerProfile(): Promise<FarmerProfile | null> {
+    try {
+      const res = await fetchApi<FarmerProfile>('/farm/profile');
+      if (res.success && res.data) {
+        return res.data;
+      }
+      return null;
+    } catch (err: any) {
+      console.warn('[FarmService] Error fetching farmer profile:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Update current farmer profile
+   */
+  static async updateFarmerProfile(updates: Partial<FarmerProfile>): Promise<FarmerProfile | null> {
+    try {
+      const res = await fetchApi<FarmerProfile>('/farm/profile', {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+      });
+      if (res.success && res.data) {
+        return res.data;
+      }
+      return null;
+    } catch (err: any) {
+      console.warn('[FarmService] Error updating profile:', err.message);
+      return null;
+    }
+  }
 }

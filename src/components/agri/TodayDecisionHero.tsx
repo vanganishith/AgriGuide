@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import type { TodayDecision, Language, LocationContext } from '../../types';
 import { translations } from '../../i18n/translations';
 import { SpeechService } from '../../services/voice/speechService';
+import { localizeDecision, localizeCropTarget, localizeLocation } from '../../i18n/agriLocalization';
 import { 
   CheckCircle2, 
   Clock, 
@@ -34,6 +35,8 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
   const [showAdviceModal, setShowAdviceModal] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
+  const locDecision = localizeDecision(decision, currentLang);
+
   const handleSpeakDecision = () => {
     if (isSpeaking) {
       SpeechService.stopSpeaking();
@@ -41,7 +44,7 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
       return;
     }
 
-    const textToSpeak = `${t.todayPriorityBadge}: ${decision.actionTitle}. ${t.reasonPrefix} ${decision.reason}. ${t.recommendedBefore} ${decision.deadline}.`;
+    const textToSpeak = `${t.todayPriorityBadge}: ${locDecision.actionTitle}. ${t.reasonPrefix} ${locDecision.reason}. ${t.recommendedBefore} ${locDecision.deadline}.`;
     SpeechService.speakText(textToSpeak, currentLang);
     setIsSpeaking(true);
     setTimeout(() => setIsSpeaking(false), 8000);
@@ -117,7 +120,7 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
                   fontWeight: 600,
                   whiteSpace: 'nowrap',
                 }}>
-                  {decision.cropTarget}
+                  {locDecision.cropTarget}
                 </span>
               </div>
 
@@ -159,7 +162,7 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
                 textDecoration: decision.isCompleted ? 'line-through' : 'none',
               }}
             >
-              {decision.actionTitle}
+              {locDecision.actionTitle}
             </h1>
 
             {/* Reason Box */}
@@ -179,7 +182,7 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
                 <strong style={{ color: 'var(--ag-color-primary-dark)', marginRight: '6px' }}>
                   {t.reasonPrefix}
                 </strong>
-                {decision.reason}
+                {locDecision.reason}
               </p>
             </div>
 
@@ -205,7 +208,7 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
                 border: '1px solid #F7B5B3',
               }}>
                 <Clock size={13} />
-                <span>{decision.deadline}</span>
+                <span>{locDecision.deadline}</span>
               </div>
 
               {/* Weather Context Tag */}
@@ -219,7 +222,7 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
                 padding: '4px 8px',
                 borderRadius: 'var(--ag-radius-sm)',
               }}>
-                <span>{decision.weatherContext}</span>
+                <span>{locDecision.weatherContext}</span>
               </div>
             </div>
           </div>
@@ -310,8 +313,8 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
               fontSize: '11px',
               color: 'var(--ag-color-text-secondary)',
             }}>
-              <span>{t.sourcePrefix} {decision.source}</span>
-              <span>Validated by Decision Rules</span>
+              <span>{t.sourcePrefix} {locDecision.source}</span>
+              <span>{t.validatedByRules}</span>
             </div>
           </div>
         </div>
@@ -370,10 +373,10 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
                 marginBottom: '4px',
               }}>
                 <MapPin size={11} />
-                <span>{location.district}, {location.state}</span>
+                <span>{localizeLocation(location.district, location.state, currentLang)}</span>
               </div>
               <h3 style={{ fontSize: '15px', fontWeight: 700, textShadow: '0 1px 2px rgba(0,0,0,0.5)', marginBottom: '0' }}>
-                4.5 Acres · Cotton & Maize
+                {localizeCropTarget('4.5 Acres · Cotton & Maize', currentLang)}
               </h3>
             </div>
           </div>
@@ -407,7 +410,7 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
               <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--ag-color-text-primary)' }}>
-                Field Action Guide
+                {t.fieldActionGuide}
               </h3>
               <button 
                 onClick={() => setShowAdviceModal(false)}
@@ -425,13 +428,13 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
 
             <div style={{ fontSize: '14px', lineHeight: 1.6, color: 'var(--ag-color-text-primary)' }}>
               <p style={{ marginBottom: '12px' }}>
-                <strong>Dosage:</strong> Mix 5 ml of Neem Oil (1500 ppm) per liter of water with 1 g detergent powder as surfactant.
+                <strong>{t.dosageLabel}</strong> {t.dosageText}
               </p>
               <p style={{ marginBottom: '12px' }}>
-                <strong>Spray Direction:</strong> Target the underside of the leaf canopy where Whitefly nymphs cluster.
+                <strong>{t.sprayDirectionLabel}</strong> {t.sprayDirectionText}
               </p>
               <p style={{ marginBottom: '12px' }}>
-                <strong>Weather Safety:</strong> Wind speed is currently optimal. Complete spraying before afternoon heat increases.
+                <strong>{t.weatherSafetyLabel}</strong> {t.weatherSafetyText}
               </p>
             </div>
 
@@ -453,7 +456,7 @@ export const TodayDecisionHero: React.FC<TodayDecisionHeroProps> = ({
                 cursor: 'pointer',
               }}
             >
-              {decision.isCompleted ? 'Keep Completed' : 'Complete and Return'}
+              {decision.isCompleted ? t.keepCompleted : t.completeAndReturn}
             </button>
           </div>
         </div>

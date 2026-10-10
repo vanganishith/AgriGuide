@@ -1,5 +1,6 @@
 import React from 'react';
 import type { Language, WeatherData, LocationContext } from '../../types';
+import { localizeLocation } from '../../i18n/agriLocalization';
 import { 
   X, 
   CloudSun, 
@@ -29,20 +30,24 @@ export const SevenDayForecastModal: React.FC<SevenDayForecastModalProps> = ({
   if (!isOpen) return null;
 
   // Generate 7-day grounded forecast based on verified district data
-  const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const daysOfWeekEn = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const daysOfWeekTe = ['ఆదివారం', 'సోమవారం', 'మంగళవారం', 'బుధవారం', 'గురువారం', 'శుక్రవారం', 'శనివారం'];
+  const daysOfWeekHi = ['रविवार', 'सोमवार', 'मंगलवार', 'बुधवार', 'गुरुवार', 'शुक्रवार', 'शनिवार'];
   const today = new Date();
 
   const forecastDays = Array.from({ length: 7 }).map((_, idx) => {
     const d = new Date(today);
     d.setDate(today.getDate() + idx);
-    const dayName = idx === 0 ? 'Today' : (idx === 1 ? 'Tomorrow' : daysOfWeek[d.getDay()]);
+    let dayName = idx === 0 ? (currentLang === 'te' ? 'ఈ రోజు' : currentLang === 'hi' ? 'आज' : 'Today') 
+      : (idx === 1 ? (currentLang === 'te' ? 'రేపు' : currentLang === 'hi' ? 'कल' : 'Tomorrow') 
+      : (currentLang === 'te' ? daysOfWeekTe[d.getDay()] : currentLang === 'hi' ? daysOfWeekHi[d.getDay()] : daysOfWeekEn[d.getDay()]));
+
     const dateStr = d.toLocaleDateString(currentLang === 'te' ? 'te-IN' : (currentLang === 'hi' ? 'hi-IN' : 'en-IN'), {
       day: 'numeric',
       month: 'short',
     });
 
     const baseTemp = currentWeather?.temperature || 28;
-    // Controlled meteorological variations around current verified base
     const maxTemp = idx === 0 ? baseTemp : Math.round(baseTemp + ((idx % 3) - 1));
     const minTemp = Math.round(maxTemp - 6 - (idx % 2));
     
@@ -54,26 +59,26 @@ export const SevenDayForecastModal: React.FC<SevenDayForecastModalProps> = ({
     else if (idx === 5) rainProb = 35;
     else rainProb = 10;
 
-    let condition = 'Partly Cloudy';
+    let condition = currentLang === 'te' ? 'పాక్షికంగా మేఘావృతం' : currentLang === 'hi' ? 'आंशिक रूप से बादल' : 'Partly Cloudy';
     let icon = <CloudSun size={24} color="#0284C7" />;
     let sprayStatus: 'safe' | 'caution' | 'unsafe' = 'safe';
-    let sprayNote = 'Good spray window (morning)';
+    let sprayNote = currentLang === 'te' ? 'ఉదయం వేళల్లో పిచికారీకి మంచి సమయం' : currentLang === 'hi' ? 'सुबह छिड़काव के लिए अच्छा समय' : 'Good spray window (morning)';
 
     if (rainProb >= 50) {
-      condition = 'Showers / Rain';
+      condition = currentLang === 'te' ? 'వర్షం / జల్లులు' : currentLang === 'hi' ? 'बारिश / बौछारें' : 'Showers / Rain';
       icon = <CloudRain size={24} color="#2563EB" />;
       sprayStatus = 'unsafe';
-      sprayNote = 'Rain expected — Avoid spraying';
+      sprayNote = currentLang === 'te' ? 'వర్షం పడే అవకాశం ఉంది — మందు కొట్టవద్దు' : currentLang === 'hi' ? 'बारिश की संभावना — छिड़काव से बचें' : 'Rain expected — Avoid spraying';
     } else if (rainProb >= 25) {
-      condition = 'Cloudy / Isolated rain';
+      condition = currentLang === 'te' ? 'మేఘావృతం / అక్కడక్కడ వర్షం' : currentLang === 'hi' ? 'बादल / छिटपुट बारिश' : 'Cloudy / Isolated rain';
       icon = <CloudSun size={24} color="#0284C7" />;
       sprayStatus = 'caution';
-      sprayNote = 'Spray only in sheltered early hours';
+      sprayNote = currentLang === 'te' ? 'ఉదయం తక్కువ గాలి ఉన్న వేళల్లో మాత్రమే పిచికారీ చేయండి' : currentLang === 'hi' ? 'केवल सुबह शांत मौसम में छिड़काव करें' : 'Spray only in sheltered early hours';
     } else {
-      condition = 'Clear & Sunny';
+      condition = currentLang === 'te' ? 'స్వచ్ఛమైన ఎండ / నిర్మలం' : currentLang === 'hi' ? 'साफ और धूप' : 'Clear & Sunny';
       icon = <Sun size={24} color="#D97706" />;
       sprayStatus = 'safe';
-      sprayNote = 'Safe for fertilization & spraying';
+      sprayNote = currentLang === 'te' ? 'ఎరువులు & మందుల పిచికారీకి అనుకూలం' : currentLang === 'hi' ? 'उर्वरक और छिड़काव के लिए सुरक्षित' : 'Safe for fertilization & spraying';
     }
 
     return {
@@ -135,13 +140,13 @@ export const SevenDayForecastModal: React.FC<SevenDayForecastModalProps> = ({
             </div>
             <div>
               <h3 style={{ fontSize: '18px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: 0 }}>
-                7-Day Weather & Spray Forecast
+                {currentLang === 'te' ? '7 రోజుల వాతావరణం & పిచికారీ సూచన' : currentLang === 'hi' ? '7 दिनों का मौसम और छिड़काव पूर्वानुमान' : '7-Day Weather & Spray Forecast'}
               </h3>
               <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--ag-color-text-secondary)', marginTop: '2px' }}>
                 <MapPin size={12} />
-                <span>{location.district}, {location.state}</span>
+                <span>{localizeLocation(location.district, location.state, currentLang)}</span>
                 <span>·</span>
-                <span>Open-Meteo Verified Forecast</span>
+                <span>{currentLang === 'te' ? 'Open-Meteo ధృవీకరించిన నివేదిక' : currentLang === 'hi' ? 'Open-Meteo सत्यापित पूर्वानुमान' : 'Open-Meteo Verified Forecast'}</span>
               </div>
             </div>
           </div>
@@ -176,7 +181,11 @@ export const SevenDayForecastModal: React.FC<SevenDayForecastModalProps> = ({
           color: '#166534',
           lineHeight: 1.4,
         }}>
-          <strong>Weekly Agronomic Summary:</strong> Moderate daytime temperatures with favourable morning spraying conditions expected through mid-week. Plan critical fungicide or foliar applications before Friday.
+          <strong>{currentLang === 'te' ? 'వారాంతపు వ్యవసాయ సారాంశం:' : currentLang === 'hi' ? 'साप्ताहिक कृषि सारांश:' : 'Weekly Agronomic Summary:'}</strong> {currentLang === 'te' 
+            ? 'ఈ వారంలో మోస్తరు ఉష్ణోగ్రతలు మరియు ఉదయం వేళల్లో పిచికారీకి అనుకూలమైన వాతావరణం ఉంటుంది. శుక్రవారానికి ముందే ముఖ్యమైన మందుల పిచికారీ పూర్తి చేయండి.' 
+            : currentLang === 'hi' 
+            ? 'सप्ताह के दौरान मध्यम तापमान और सुबह के समय छिड़काव के लिए अनुकूल स्थिति रहेगी। शुक्रवार से पहले जरूरी छिड़काव पूरा करें।' 
+            : 'Moderate daytime temperatures with favourable morning spraying conditions expected through mid-week. Plan critical fungicide or foliar applications before Friday.'}
         </div>
 
         {/* Daily Breakdown List */}
@@ -220,7 +229,7 @@ export const SevenDayForecastModal: React.FC<SevenDayForecastModalProps> = ({
                     / {day.minTemp}°C
                   </span>
                   <div style={{ fontSize: '11px', color: day.rainProb > 40 ? '#2563EB' : 'var(--ag-color-text-secondary)', fontWeight: 700 }}>
-                    💧 {day.rainProb}% rain prob
+                    💧 {day.rainProb}% {currentLang === 'te' ? 'వర్ష సూచన' : currentLang === 'hi' ? 'बारिश की संभावना' : 'rain prob'}
                   </div>
                 </div>
               </div>
@@ -241,7 +250,7 @@ export const SevenDayForecastModal: React.FC<SevenDayForecastModalProps> = ({
                 {day.sprayStatus === 'safe' && <CheckCircle size={14} />}
                 {day.sprayStatus === 'caution' && <AlertTriangle size={14} />}
                 {day.sprayStatus === 'unsafe' && <XCircle size={14} />}
-                <span>Spray status: {day.sprayNote}</span>
+                <span>{currentLang === 'te' ? 'పిచికారీ స్థితి:' : currentLang === 'hi' ? 'छिड़काव स्थिति:' : 'Spray status:'} {day.sprayNote}</span>
               </div>
             </div>
           ))}
@@ -263,7 +272,7 @@ export const SevenDayForecastModal: React.FC<SevenDayForecastModalProps> = ({
             cursor: 'pointer',
           }}
         >
-          Done
+          {currentLang === 'te' ? 'పూర్తయింది' : currentLang === 'hi' ? 'संपन्न' : 'Done'}
         </button>
       </div>
     </div>

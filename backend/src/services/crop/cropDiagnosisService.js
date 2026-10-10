@@ -1,11 +1,316 @@
 import { env } from '../../config/env.js';
 import { supabase, isSupabaseConfigured, getOrCreateDefaultFarmerUser } from '../../config/supabase.js';
 
+export async function investigateCropPhotos({
+  images = [],
+  cropName = 'Cotton',
+  language = 'en',
+  voiceTranscript = null,
+  conversationHistory = [],
+  farmerContext = null,
+}) {
+  if (!env.FIREWORKS_API_KEY) {
+    const error = new Error('Fireworks AI vision model service is not configured on server.');
+    error.code = 'VISION_UNCONFIGURED';
+    error.statusCode = 503;
+    throw error;
+  }
+
+  if (!images || images.length === 0) {
+    const error = new Error('At least one crop photo (1 to 5 images) is required for investigation.');
+    error.code = 'IMAGES_REQUIRED';
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const analyzedImages = images.slice(0, 5);
+  const questionsAskedCount = Array.isArray(conversationHistory) ? conversationHistory.length : 0;
+
+  // HARD PRODUCT CONSTRAINT: Maximum 3 questions total.
+  if (questionsAskedCount >= 3) {
+    console.log('[CropInvestigator] Reached max questions limit (3). Forcing ready_for_diagnosis.');
+    return {
+      state: 'ready_for_diagnosis',
+      cropMismatchDetected: false,
+      selectedCrop: cropName,
+      visualCropIdentified: cropName,
+      voiceCropMentioned: null,
+      mismatchNotice: null,
+      explanation: null,
+      additionalPhotosNeeded: [],
+      question: null,
+      questionsAskedCount,
+      aiLatencyMs: 0,
+    };
+  }
+
+  const languageInstruction =
+    language === 'te' ? 'Output all questions, explanations, reasons, and mismatch notices in authentic Telugu language (తెలుగు).' :
+    language === 'hi' ? 'Output all questions, explanations, reasons, and mismatch notices in authentic Hindi language (हिन्दी).' :
+    'Output all questions, explanations, reasons, and mismatch notices in clear, simple English accessible for an Indian farmer.';
+
+  const languageName = language === 'te' ? 'Telugu (తెలుగు)' : (language === 'hi' ? 'Hindi (हिन्दी)' : 'English');
+
+  let historySummary = 'None (This is the first look at the photos).';
+  if (questionsAskedCount > 0) {
+    historySummary = conversationHistory.map((item, idx) => {
+      const q = item.questionText || item.question || `Question ${idx + 1}`;
+      const a = item.answerText || item.answer || 'No answer';
+      const type = item.answerType === 'unknown' ? '(Farmer explicitly said they do not know)' : `(${item.answerType || 'voice'})`;
+      return `Q${idx + 1}: "${q}"\nFarmer Answer: "${a}" ${type}`;
+    }).join('\n');
+  }
+
+  const investigatorSystemPrompt = `You are AgriGuide Crop Doctor AI Investigator, an expert agricultural diagnostic reasoning system for Indian farmers.
+You analyze uploaded crop photos, check consistency with the selected crop and initial voice statement, and decide if you need to ask the farmer a focused question before arriving at a final diagnosis.
+
+Evidence Provided:
+1. Selected Crop: "${cropName}" (Context from UI)
+2. Photos Attached: ${analyzedImages.length} image(s)
+3. Initial Voice Transcript: ${voiceTranscript ? `"${voiceTranscript.trim()}"` : 'None provided'}
+4. Consultation History (Questions already asked and answered):
+${historySummary}
+
+CRITICAL INVESTIGATION RULES:
+1. CROSS-MODAL CONSISTENCY & MISMATCH:
+   - Check if the uploaded photos show the selected crop ("${cropName}").
+   - If the photo clearly shows a completely different crop (e.g. selected is "Chilli" but photo clearly shows Tomato or Cotton, or a poster/infographic):
+     * "state": "mismatch"
+     * "cropMismatchDetected": true
+     * "visualCropIdentified": "<identified crop or object>"
+     * "mismatchNotice": Polite explanation in authentic ${languageName}
+     * "question": null
+   - If the farmer explicitly named a contradictory crop in voice (e.g. "My tomato plants" when selected is Chilli):
+     * "state": "mismatch"
+     * "cropMismatchDetected": true
+     * "mismatchNotice": Polite explanation in authentic ${languageName}
+     * "question": null
+   - If the farmer did NOT name any crop in voice, but only described symptoms (e.g. "leaves have dark spots and are curling"), this is NOT a mismatch! Proceed normally.
+   - If the farmer said "I don't know" or gave timeline/field details, this is NOT a mismatch! Proceed normally.
+
+2. INSUFFICIENT OR UNUSABLE IMAGES:
+   - If the photo is too blurry, dark, not a crop plant, or impossible to evaluate:
+     * "state": "insufficient_image"
+     * "explanation": Clear advice in ${languageName} on what photo to capture
+     * "additionalPhotosNeeded": Array of requested photo types (e.g. "Clear close-up of affected leaf", "Back of leaf")
+     * "question": null
+
+3. FOCUSED QUESTION GENERATION (GUIDED CONSULTATION WORKFLOW):
+   - When the photos show any crop stress, pest damage, spots, wilting, curling, or disease symptoms:
+     * Generate 1 to 2 targeted, practical field questions in authentic ${languageName} in a single queue so the farmer can answer them smoothly without waiting.
+     * High-value practical questions for farmers:
+       a) Onset & Timeline: e.g. "How many days ago did you first notice these symptoms, and are they spreading?" (ఎన్ని రోజుల క్రితం ఈ మచ్చలు/లక్షణాలు కనిపించాయి? / यह लक्षण कितने दिन पहले दिखे?)
+       b) Spread & Plant Location: e.g. "Is this damage seen across the whole field or on a few plants? Are upper or lower leaves affected?" (పొలంలో కొన్ని మొక్కలకే ఉందా లేదా చేను అంతటా వ్యాపించిందా? / क्या यह कुछ ही पौधों पर है या पूरे खेत में?)
+       c) Moisture & Spray History: e.g. "Have you sprayed any chemical or fertilizer in the last 7 days?" (గత వారం రోజుల్లో ఏదైనా మందు లేదా ఎరువు పిచికారీ చేశారా?)
+     * Set "state": "needs_farmer_input"
+     * Provide "questions": [
+         {
+           "text": "Short, natural, farmer-friendly question in authentic ${languageName}",
+           "reason": "Clear explanation of why this detail helps determine the right spray or treatment in authentic ${languageName}",
+           "answerMode": "voice_or_dont_know"
+         }
+       ]
+   - When to proceed directly without questions ("state": "ready_for_diagnosis", "questions": []):
+     * If the plant is visibly 100% healthy with no symptoms.
+     * If all critical field details are already answered in the initial voice transcript.
+     * If there is a mismatch or insufficient image.
+
+4. LANGUAGE INSTRUCTION:
+   ${languageInstruction}
+   All dynamic questions, reasons, mismatch notices, and explanations MUST be in authentic ${languageName}.
+
+Return ONLY a JSON object matching this schema:
+{
+  "state": "needs_farmer_input" | "ready_for_diagnosis" | "mismatch" | "insufficient_image",
+  "cropAssessment": {
+    "selectedCrop": "${cropName}",
+    "visualCrop": string | null,
+    "cropMatch": boolean,
+    "isAgriculturalImage": boolean
+  },
+  "cropMismatchDetected": boolean,
+  "visualCropIdentified": string | null,
+  "voiceCropMentioned": string | null,
+  "mismatchNotice": string | null,
+  "explanation": string | null,
+  "additionalPhotosNeeded": string[],
+  "questions": [
+    {
+      "text": string,
+      "reason": string,
+      "answerMode": "voice_or_dont_know"
+    }
+  ]
+}`;
+
+  const userContent = [];
+  let contextDescription = `Selected Crop: ${cropName}\nTotal Photos Attached: ${analyzedImages.length}\n`;
+  if (voiceTranscript && voiceTranscript.trim().length > 0) {
+    contextDescription += `Farmer's Spoken Description (Voice): "${voiceTranscript.trim()}"\n`;
+  }
+  if (questionsAskedCount > 0) {
+    contextDescription += `Consultation History (${questionsAskedCount} question(s) asked):\n${historySummary}\n`;
+  }
+  if (farmerContext) {
+    contextDescription += `Farm Context: ${typeof farmerContext === 'string' ? farmerContext : JSON.stringify(farmerContext)}\n`;
+  }
+
+  userContent.push({
+    type: 'text',
+    text: `${contextDescription}\n` +
+      (questionsAskedCount < 2
+        ? `Please analyze these ${analyzedImages.length} photo(s) together with the selected crop and farmer description. Unless this is an obvious crop mismatch, unusable photo, or perfectly healthy crop with no issues, YOU MUST generate 1 practical farmer question (e.g. onset timeline, whole-plot spread, or upper vs lower leaves) to conduct the guided agricultural consultation ("state": "needs_farmer_input").`
+        : `Please analyze these ${analyzedImages.length} photo(s) and the completed consultation history to determine if one final question is needed or if you are ready for final diagnosis.`)
+  });
+
+  for (const img of analyzedImages) {
+    const mimeType = img.mimetype || 'image/jpeg';
+    const base64Data = img.buffer.toString('base64');
+    userContent.push({
+      type: 'image_url',
+      image_url: {
+        url: `data:${mimeType};base64,${base64Data}`
+      }
+    });
+  }
+
+  const completionsUrl = `${env.FIREWORKS_BASE_URL}/chat/completions`;
+  const t0 = performance.now();
+  const response = await fetch(completionsUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.FIREWORKS_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: env.FIREWORKS_MODEL,
+      messages: [
+        { role: 'system', content: investigatorSystemPrompt },
+        { role: 'user', content: userContent },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.2,
+      max_tokens: 4096,
+    }),
+    signal: AbortSignal.timeout(60000),
+  });
+  const t1 = performance.now();
+  const aiLatencyMs = Math.round(t1 - t0);
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error(`[CropInvestigator AI] HTTP error (${response.status}): ${errText}`);
+    const error = new Error(`Fireworks vision model error (${response.status}): ${errText}`);
+    error.code = 'VISION_PROVIDER_ERROR';
+    error.statusCode = 502;
+    throw error;
+  }
+
+  const aiJson = await response.json();
+  const choice = aiJson.choices?.[0] || {};
+  const messageObj = choice.message || {};
+  let rawContent = (messageObj.content || '').trim();
+  if (!rawContent && messageObj.reasoning_content) {
+    rawContent = messageObj.reasoning_content.trim();
+  }
+
+  console.log(`[CropInvestigator AI] raw response length: ${rawContent.length}, latency: ${aiLatencyMs}ms`);
+
+  let parsed = parseOrRepairDiagnosticJson(rawContent);
+  if (!parsed) {
+    console.warn('[CropInvestigator AI] Could not parse investigator JSON using standard parser. Attempting regex extraction.');
+    // Direct regex extraction for investigator fields
+    const stateMatch = rawContent.match(/"state"\s*:\s*"([^"]+)"/i);
+    const qTextMatch = rawContent.match(/"text"\s*:\s*"([^"]+)"/i);
+    const qReasonMatch = rawContent.match(/"reason"\s*:\s*"([^"]+)"/i);
+    const mismatchMatch = rawContent.match(/"mismatchNotice"\s*:\s*"([^"]+)"/i) || rawContent.match(/"cropMismatchDetected"\s*:\s*(true|false)/i);
+
+    if (stateMatch || qTextMatch || mismatchMatch) {
+      parsed = {
+        state: stateMatch ? stateMatch[1] : (qTextMatch ? 'needs_farmer_input' : 'ready_for_diagnosis'),
+        cropMismatchDetected: mismatchMatch ? (mismatchMatch[1] === 'true' || Boolean(rawContent.match(/"mismatchNotice"/i))) : false,
+        mismatchNotice: mismatchMatch ? (rawContent.match(/"mismatchNotice"\s*:\s*"([^"]+)"/i)?.[1] || null) : null,
+        question: qTextMatch ? {
+          text: qTextMatch[1],
+          reason: qReasonMatch ? qReasonMatch[1] : '',
+          answerMode: 'voice_or_dont_know'
+        } : null
+      };
+    }
+  }
+
+  if (!parsed) {
+    console.warn('[CropInvestigator AI] Could not parse investigator JSON. Transitioning to ready_for_diagnosis.');
+    return {
+      state: 'ready_for_diagnosis',
+      cropMismatchDetected: false,
+      selectedCrop: cropName,
+      visualCropIdentified: cropName,
+      voiceCropMentioned: null,
+      mismatchNotice: null,
+      explanation: null,
+      additionalPhotosNeeded: [],
+      question: null,
+      questionsAskedCount,
+      aiLatencyMs,
+    };
+  }
+
+  const isMismatch = parsed.state === 'mismatch' || Boolean(parsed.cropMismatchDetected);
+  const isInsufficient = parsed.state === 'insufficient_image';
+  let state = parsed.state || 'ready_for_diagnosis';
+  if (isInsufficient) state = 'insufficient_image';
+
+  let questionsList = [];
+  if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+    questionsList = parsed.questions
+      .filter(q => q && typeof q.text === 'string' && q.text.trim().length > 0)
+      .map(q => ({
+        text: q.text.trim(),
+        reason: (q.reason || '').trim(),
+        answerMode: 'voice_or_dont_know',
+      }));
+  } else if (parsed.question && typeof parsed.question.text === 'string' && parsed.question.text.trim().length > 0) {
+    questionsList = [{
+      text: parsed.question.text.trim(),
+      reason: (parsed.question.reason || '').trim(),
+      answerMode: 'voice_or_dont_know',
+    }];
+  }
+
+  let questionObj = questionsList[0] || null;
+  if (state === 'needs_farmer_input' && questionsList.length === 0) {
+    state = 'ready_for_diagnosis';
+  }
+
+  if (isMismatch) {
+    state = 'mismatch';
+    questionObj = null;
+    questionsList = [];
+  }
+
+  return {
+    state,
+    cropMismatchDetected: isMismatch,
+    selectedCrop: parsed.cropAssessment?.selectedCrop || cropName,
+    visualCropIdentified: parsed.visualCropIdentified || parsed.cropAssessment?.visualCrop || null,
+    voiceCropMentioned: parsed.voiceCropMentioned || null,
+    mismatchNotice: parsed.mismatchNotice || (isMismatch ? parsed.explanation : null),
+    explanation: parsed.explanation || null,
+    additionalPhotosNeeded: Array.isArray(parsed.additionalPhotosNeeded) ? parsed.additionalPhotosNeeded : [],
+    questions: questionsList,
+    question: questionObj,
+    questionsAskedCount,
+    aiLatencyMs,
+  };
+}
+
 export async function diagnoseCropMultimodal({
   images = [],
   voiceTranscript = null,
   cropName = 'Cotton',
   language = 'en',
+  consultationQnA = [],
   farmerContext = null,
   user = null,
   audioFile = null,
@@ -34,11 +339,23 @@ export async function diagnoseCropMultimodal({
 
   const languageName = language === 'te' ? 'Telugu (తెలుగు)' : (language === 'hi' ? 'Hindi (हिन्दी)' : 'English');
 
+  let consultationHistoryText = 'No interactive follow-up questions were asked (direct visual assessment).';
+  if (Array.isArray(consultationQnA) && consultationQnA.length > 0) {
+    consultationHistoryText = consultationQnA.map((item, idx) => {
+      const q = item.questionText || item.question || `Question ${idx + 1}`;
+      const a = item.answerText || item.answer || 'No answer';
+      const type = item.answerType === 'unknown' ? '(Farmer explicitly answered: I do not know)' : `(${item.answerType || 'voice'})`;
+      return `Q${idx + 1}: "${q}"\nFarmer Response: "${a}" ${type}`;
+    }).join('\n');
+  }
+
   const systemPrompt = `You are AgriGuide Crop Doctor, an expert agricultural multimodal diagnostic reasoning system for Indian farmers.
 You are evaluating multiple independent evidence sources together:
 1. Selected Crop: User-selected UI context ("${cropName}"), not guaranteed ground truth.
 2. Uploaded Photos: Visual evidence (${analyzedImages.length} image(s) provided), not guaranteed ground truth.
-3. Farmer Voice Transcript: Farmer-reported description (${voiceTranscript ? `"${voiceTranscript.trim()}"` : 'None provided'}), not verified fact.
+3. Farmer Initial Voice Transcript: Farmer-reported description (${voiceTranscript ? `"${voiceTranscript.trim()}"` : 'None provided'}), not verified fact.
+4. Guided Consultation Q&A (Questions asked by AI & farmer answers):
+${consultationHistoryText}
 
 Compare all evidence before diagnosis. Do NOT force agreement.
 
@@ -52,8 +369,8 @@ CRITICAL EVIDENCE REASONING PRINCIPLES:
    - "voiceAssessment":
      * cropMentioned: Crop name explicitly spoken by farmer (e.g. "Tomato", "Chilli", "Cotton"), or null if no crop was named.
      * cropMentionedExplicitly: true if the farmer explicitly named a crop, false if they only described symptoms without naming a crop.
-     * reportedSymptoms: Array of symptoms described in speech.
-     * reportedContext: Array of timeline, weather, or actions described.
+     * reportedSymptoms: Array of symptoms described in speech and guided consultation answers.
+     * reportedContext: Array of timeline, weather, spreading, or actions described.
 
 2. CROSS-MODAL CONSISTENCY EVALUATION (Must be exactly one of: "consistent" | "conflict" | "insufficient"):
    - "consistent": The selected crop, visual evidence, and spoken voice information are compatible.
@@ -67,13 +384,13 @@ CRITICAL EVIDENCE REASONING PRINCIPLES:
 
 3. UNIFIED MULTIMODAL DIAGNOSIS (When evidence is "consistent"):
    - DO NOT give analysis or recommendations based only on the images!
-   - You MUST deeply integrate and combine BOTH the visual symptoms from all photos AND any specific details/symptoms/questions mentioned in the farmer's voice:
-     * "combinedAssessment": Comprehensive explanation connecting what is visible in photos with what the farmer reported in voice.
+   - You MUST deeply integrate and combine BOTH the visual symptoms from all photos AND all specific details/symptoms/timeline mentioned by the farmer during the guided consultation:
+     * "combinedAssessment": Comprehensive explanation connecting what is visible in photos with what the farmer reported in voice and consultation answers.
      * "symptomsObserved": Merge visual observations and farmer-reported symptoms.
-     * "visualFindings": Visible symptoms on foliage/fruit.
-     * "farmerReportedSymptoms": Spoken symptoms.
+     * "visualFindings": Visible symptoms on foliage/fruit from photos.
+     * "farmerReportedSymptoms": Spoken symptoms and consultation Q&A answers.
      * "likelyCause": Agronomic cause synthesizing visual symptoms with spoken timeline/conditions.
-     * "recommendation" & "immediateAction": Practical steps addressing both the photographed condition and the farmer's spoken concerns.
+     * "recommendation" & "immediateAction": 2-4 concise practical steps addressing both the photographed condition and the farmer's spoken concerns.
      * "summary": Direct farmer-friendly summary.
    - Deterministic Outcomes:
      * "problem_detected": Clear visual disease/pest/deficiency signs.
@@ -281,58 +598,76 @@ Keep all strings, explanations, and list items concise, crisp, and direct so the
     })
     .filter(a => a.imageIndex >= 0 && a.imageIndex < analyzedImages.length);
 
-  const structuredResponse = {
-    status: finalStatus,
-    evidenceAssessment: {
+    const combinedFarmerNotes = [];
+    if (voiceTranscript && voiceTranscript.trim().length > 0) {
+      combinedFarmerNotes.push(voiceTranscript.trim());
+    }
+    if (Array.isArray(consultationQnA)) {
+      consultationQnA.forEach(q => {
+        const qText = q.questionText || q.question || '';
+        const aText = q.answerText || q.answer || '';
+        if (qText && aText) {
+          combinedFarmerNotes.push(`${qText}: "${aText}"`);
+        }
+      });
+    }
+
+    const farmerReportedSymptoms = Array.isArray(diagnosisResult.farmerReportedSymptoms) && diagnosisResult.farmerReportedSymptoms.length > 0
+      ? diagnosisResult.farmerReportedSymptoms
+      : (combinedFarmerNotes.length > 0 ? combinedFarmerNotes : []);
+
+    const structuredResponse = {
+      status: finalStatus,
+      evidenceAssessment: {
+        selectedCrop: selectedCropVal,
+        photoCropAssessment: {
+          cropIdentified: visualCropVal,
+          identityConfidence: photoAssessment.identityConfidence || (isInsufficient ? 'low' : 'high'),
+          isAgriculturalImage: photoAssessment.isAgriculturalImage !== false,
+          reason: photoAssessment.reason || 'Visual plant evaluation',
+        },
+        voiceAssessment: {
+          cropMentioned: voiceCropVal,
+          cropMentionedExplicitly: Boolean(voiceAssessment.cropMentionedExplicitly || voiceCropVal),
+          reportedSymptoms: Array.isArray(voiceAssessment.reportedSymptoms) ? voiceAssessment.reportedSymptoms : combinedFarmerNotes,
+          reportedContext: Array.isArray(voiceAssessment.reportedContext) ? voiceAssessment.reportedContext : [],
+        },
+        crossModalConsistency,
+        conflictReason: conflictReasonVal,
+        evidenceQuality: isInsufficient ? 'insufficient' : 'sufficient',
+      },
+      combinedAssessment: diagnosisResult.combinedAssessment || diagnosisResult.summary || 'Evidence evaluated.',
+      cropMismatchDetected: isConflict,
       selectedCrop: selectedCropVal,
-      photoCropAssessment: {
-        cropIdentified: visualCropVal,
-        identityConfidence: photoAssessment.identityConfidence || (isInsufficient ? 'low' : 'high'),
-        isAgriculturalImage: photoAssessment.isAgriculturalImage !== false,
-        reason: photoAssessment.reason || 'Visual plant evaluation',
-      },
-      voiceAssessment: {
-        cropMentioned: voiceCropVal,
-        cropMentionedExplicitly: Boolean(voiceAssessment.cropMentionedExplicitly || voiceCropVal),
-        reportedSymptoms: Array.isArray(voiceAssessment.reportedSymptoms) ? voiceAssessment.reportedSymptoms : (voiceTranscript ? [voiceTranscript] : []),
-        reportedContext: Array.isArray(voiceAssessment.reportedContext) ? voiceAssessment.reportedContext : [],
-      },
-      crossModalConsistency,
-      conflictReason: conflictReasonVal,
-      evidenceQuality: isInsufficient ? 'insufficient' : 'sufficient',
-    },
-    combinedAssessment: diagnosisResult.combinedAssessment || diagnosisResult.summary || 'Evidence evaluated.',
-    cropMismatchDetected: isConflict,
-    selectedCrop: selectedCropVal,
-    visualCropIdentified: visualCropVal,
-    voiceCropMentioned: voiceCropVal,
-    mismatchNotice: conflictReasonVal,
-    diagnosisTitle: isConflict
-      ? (language === 'te' ? 'పంట వివరాలలో తేడా గుర్తించబడింది' : language === 'hi' ? 'फसल विवरण में बेमेल' : 'Crop Input Mismatch')
-      : (diagnosisResult.diagnosisTitle || (finalStatus === 'no_issue' ? (language === 'te' ? 'పంట ఆరోగ్యంగా ఉంది' : language === 'hi' ? 'फसल स्वस्थ है' : 'Crop is Healthy & Fine') : 'Crop Observation')),
-    summary: isConflict ? conflictReasonVal : (diagnosisResult.summary || 'Visual inspection completed.'),
-    severity: normalizedSeverity,
-    symptomsObserved: Array.isArray(diagnosisResult.symptomsObserved) ? diagnosisResult.symptomsObserved : [],
-    farmerReportedSymptoms: Array.isArray(diagnosisResult.farmerReportedSymptoms) 
-      ? diagnosisResult.farmerReportedSymptoms 
-      : (voiceTranscript ? [voiceTranscript] : []),
-    visualFindings: Array.isArray(diagnosisResult.visualFindings) ? diagnosisResult.visualFindings : [],
-    likelyCause: isConflict ? null : (diagnosisResult.likelyCause || null),
-    recommendation: Array.isArray(diagnosisResult.recommendation) 
-      ? diagnosisResult.recommendation 
-      : (diagnosisResult.recommendation ? [diagnosisResult.recommendation] : ['Continue regular crop scouting.']),
-    immediateAction: diagnosisResult.immediateAction || null,
-    whatToAvoid: Array.isArray(diagnosisResult.whatToAvoid) ? diagnosisResult.whatToAvoid : [],
-    monitoringAdvice: diagnosisResult.monitoringAdvice || 'Check lower and upper leaf surfaces during morning hours.',
-    needsExpertReview: Boolean(diagnosisResult.needsExpertReview),
-    additionalPhotosNeeded: Array.isArray(diagnosisResult.additionalPhotosNeeded) ? diagnosisResult.additionalPhotosNeeded : [],
-    voiceContextUsed: Boolean(voiceTranscript && voiceTranscript.trim().length > 0),
-    imageCount: analyzedImages.length,
-    visualAnnotations,
-    title: isConflict ? 'Crop Input Mismatch' : (diagnosisResult.diagnosisTitle || 'Crop Assessment'),
-    model: env.FIREWORKS_MODEL,
-    aiLatencyMs,
-  };
+      visualCropIdentified: visualCropVal,
+      voiceCropMentioned: voiceCropVal,
+      mismatchNotice: conflictReasonVal,
+      diagnosisTitle: isConflict
+        ? (language === 'te' ? 'పంట వివరాలలో తేడా గుర్తించబడింది' : language === 'hi' ? 'फसल विवरण में बेमेल' : 'Crop Input Mismatch')
+        : (diagnosisResult.diagnosisTitle || (finalStatus === 'no_issue' ? (language === 'te' ? 'పంట ఆరోగ్యంగా ఉంది' : language === 'hi' ? 'फसल स्वस्थ है' : 'Crop is Healthy & Fine') : 'Crop Observation')),
+      summary: isConflict ? conflictReasonVal : (diagnosisResult.summary || 'Visual inspection completed.'),
+      severity: normalizedSeverity,
+      symptomsObserved: Array.isArray(diagnosisResult.symptomsObserved) ? diagnosisResult.symptomsObserved : [],
+      farmerReportedSymptoms,
+      visualFindings: Array.isArray(diagnosisResult.visualFindings) ? diagnosisResult.visualFindings : [],
+      likelyCause: isConflict ? null : (diagnosisResult.likelyCause || null),
+      recommendation: Array.isArray(diagnosisResult.recommendation) 
+        ? diagnosisResult.recommendation 
+        : (diagnosisResult.recommendation ? [diagnosisResult.recommendation] : ['Continue regular crop scouting.']),
+      immediateAction: diagnosisResult.immediateAction || null,
+      whatToAvoid: Array.isArray(diagnosisResult.whatToAvoid) ? diagnosisResult.whatToAvoid : [],
+      monitoringAdvice: diagnosisResult.monitoringAdvice || 'Check lower and upper leaf surfaces during morning hours.',
+      needsExpertReview: Boolean(diagnosisResult.needsExpertReview),
+      additionalPhotosNeeded: Array.isArray(diagnosisResult.additionalPhotosNeeded) ? diagnosisResult.additionalPhotosNeeded : [],
+      voiceContextUsed: Boolean((voiceTranscript && voiceTranscript.trim().length > 0) || (Array.isArray(consultationQnA) && consultationQnA.length > 0)),
+      imageCount: analyzedImages.length,
+      visualAnnotations,
+      consultationQnA: Array.isArray(consultationQnA) ? consultationQnA : [],
+      questionsAskedCount: Array.isArray(consultationQnA) ? consultationQnA.length : 0,
+      title: isConflict ? 'Crop Input Mismatch' : (diagnosisResult.diagnosisTitle || 'Crop Assessment'),
+      model: env.FIREWORKS_MODEL,
+      aiLatencyMs,
+    };
 
   // If status is 'mismatch' (conflict), do NOT persist to database, return immediately!
   if (finalStatus === 'mismatch') {
@@ -368,16 +703,22 @@ Keep all strings, explanations, and list items concise, crisp, and direct so the
       throw new Error('Database persistence failed: User identity could not be resolved.');
     }
 
-    // 1. Ensure profile exists in profiles table
+    // 1. Ensure profile exists in profiles table without overriding name/district with demo data
     try {
-      await supabase.from('profiles').upsert({
-        id: resolvedUserId,
-        full_name: 'Ramesh ji',
-        district: 'Warangal',
-        state: 'Telangana',
-        village: 'Geesugonda',
-        preferred_language: language || 'en',
-      }, { onConflict: 'id' });
+      const { data: existingProfile } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('id', resolvedUserId)
+        .maybeSingle();
+
+      if (!existingProfile) {
+        await supabase.from('profiles').insert({
+          id: resolvedUserId,
+          full_name: user?.fullName || 'Farmer',
+          phone: user?.phone || null,
+          preferred_language: language || 'en',
+        });
+      }
     } catch (profErr) {
       console.warn('[CropDoctor DB] Profile sync notice:', profErr.message);
     }

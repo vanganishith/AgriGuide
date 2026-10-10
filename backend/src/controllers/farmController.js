@@ -204,3 +204,53 @@ export async function acceptPlan(req, res, next) {
     next(err);
   }
 }
+
+export async function getRecommendations(req, res, next) {
+  try {
+    const recommendations = await farmService.getRecommendationsForUser(req.user || null);
+    res.json({
+      success: true,
+      data: recommendations,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function completeRecommendation(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { isCompleted = true } = req.body;
+    const result = await farmService.completeRecommendation(id, req.user || null, isCompleted);
+    res.json({
+      success: true,
+      data: result.data || result,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getFarmerProfile(req, res, next) {
+  try {
+    const profile = await farmService.getFarmerProfileForUser(req.user || null);
+    res.json({
+      success: true,
+      data: profile,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateFarmerProfile(req, res, next) {
+  try {
+    const profile = await farmService.updateFarmerProfile(req.user || null, req.body);
+    res.json({
+      success: true,
+      data: profile,
+    });
+  } catch (err) {
+    next(err);
+  }
+}

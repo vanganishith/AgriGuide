@@ -2,6 +2,7 @@ import React from 'react';
 import type { WeatherData, Language } from '../../types';
 import { translations } from '../../i18n/translations';
 import { CacheService } from '../../services/cacheService';
+import { localizeWeather } from '../../i18n/agriLocalization';
 import { Sun, CloudRain, Wind, Droplets, ShieldCheck, AlertCircle, ShieldAlert } from 'lucide-react';
 
 interface WeatherAdvisoryCardProps {
@@ -14,7 +15,7 @@ interface WeatherAdvisoryCardProps {
 }
 
 export const WeatherAdvisoryCard: React.FC<WeatherAdvisoryCardProps> = ({
-  weather,
+  weather: rawWeather,
   loading,
   error,
   currentLang,
@@ -22,6 +23,7 @@ export const WeatherAdvisoryCard: React.FC<WeatherAdvisoryCardProps> = ({
   style,
 }) => {
   const t = translations[currentLang];
+  const weather = localizeWeather(rawWeather, currentLang);
 
   if (loading) {
     return (

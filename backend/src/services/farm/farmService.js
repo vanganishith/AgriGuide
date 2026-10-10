@@ -2,6 +2,8 @@ import { env } from '../../config/env.js';
 import { supabase, isSupabaseConfigured, getOrCreateDefaultFarmerUser } from '../../config/supabase.js';
 import { getCurrentWeather } from '../weather/weatherService.js';
 import { getCurrentMarketPrices } from '../market/marketService.js';
+import { getCropDailyActivities } from '../crop/cropActivityService.js';
+import { getTodayISTDateString, calculateCropDayIST } from '../../utils/istDateUtils.js';
 
 /**
  * Get all verified crops from Supabase crops catalog
@@ -57,7 +59,7 @@ export async function identifyFarmerSession({ phone, preferredLanguage = 'en', f
   }
 
   // 1. Look up existing profile by phone
-  const { data: existingProfiles } = await supabase
+  const { data: existingProfiles, error: lookErr } = await supabase
     .from('profiles')
     .select('*')
     .eq('phone', normalizedPhone)
@@ -65,41 +67,77 @@ export async function identifyFarmerSession({ phone, preferredLanguage = 'en', f
 
   if (existingProfiles && existingProfiles.length > 0) {
     const profile = existingProfiles[0];
+    const hasName = Boolean(profile.full_name && profile.full_name.trim().length > 0 && profile.full_name.trim().toLowerCase() !== 'farmer');
     return {
       id: profile.id,
       phone: profile.phone,
-      fullName: profile.full_name,
+      fullName: profile.full_name || 'Farmer',
       state: profile.state || 'Telangana',
       district: profile.district || 'Warangal',
       village: profile.village || '',
       preferredLanguage: profile.preferred_language || preferredLanguage,
-      isNewUser: false,
+      isNewUser: !hasName,
     };
   }
 
-  // 2. Create profile if first time
-  const userId = await getOrCreateDefaultFarmerUser();
+  // 2. Create distinct Auth user & profile for this new farmer
+  let userId = null;
+  const userEmail = `farmer_${normalizedPhone}@agriguide.in`;
+  const defaultPass = `AgriGuide_${normalizedPhone}_2026!`;
+
+  try {
+    const { data: createdUser, error: authErr } = await supabase.auth.admin.createUser({
+      email: userEmail,
+      password: defaultPass,
+      email_confirm: true,
+      user_metadata: {
+        phone: normalizedPhone,
+        full_name: fullName || 'Farmer',
+      },
+    });
+
+    if (createdUser?.user?.id) {
+      userId = createdUser.user.id;
+    } else if (authErr) {
+      console.warn('[FarmService] Supabase admin createUser notice:', authErr.message);
+      const { data: usersList } = await supabase.auth.admin.listUsers();
+      const matched = usersList?.users?.find(u => u.email === userEmail || u.phone === `+91${normalizedPhone}`);
+      if (matched) {
+        userId = matched.id;
+      }
+    }
+  } catch (err) {
+    console.warn('[FarmService] Auth user creation notice:', err.message);
+  }
+
+  if (!userId) {
+    userId = crypto.randomUUID();
+  }
+
+  // 3. Insert new farmer profile record
   const { data: newProfile, error: pErr } = await supabase
     .from('profiles')
     .upsert({
       id: userId,
-      full_name: fullName || `Farmer ${normalizedPhone.slice(-4)}`,
+      full_name: fullName || 'Farmer',
       phone: normalizedPhone,
       state: 'Telangana',
       district: 'Warangal',
+      village: '',
       preferred_language: preferredLanguage || 'en',
-    })
+    }, { onConflict: 'id' })
     .select()
     .single();
 
   if (pErr) {
-    console.warn('[FarmService] Profile creation notice:', pErr.message);
+    console.error('[FarmService] Profile creation error:', pErr.message);
+    throw new Error(`Failed to create farmer profile: ${pErr.message}`);
   }
 
   return {
     id: newProfile ? newProfile.id : userId,
     phone: normalizedPhone,
-    fullName: newProfile?.full_name || 'Farmer',
+    fullName: newProfile?.full_name || fullName || 'Farmer',
     state: newProfile?.state || 'Telangana',
     district: newProfile?.district || 'Warangal',
     village: newProfile?.village || '',
@@ -113,10 +151,7 @@ export async function identifyFarmerSession({ phone, preferredLanguage = 'en', f
  * Zero mock data: if 0 farms exist in DB, returns []
  */
 export async function getFarmsForUser(user) {
-  let userId = user?.id || null;
-  if (!userId) {
-    userId = await getOrCreateDefaultFarmerUser();
-  }
+  const userId = user?.id || null;
 
   if (!isSupabaseConfigured() || !userId) {
     return [];
@@ -159,7 +194,7 @@ export async function getFarmsForUser(user) {
     .select('*')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(20);
 
   const plotsByFarmId = new Map();
   (plotRows || []).forEach((plot) => {
@@ -171,16 +206,17 @@ export async function getFarmsForUser(user) {
       d.crop_name?.toLowerCase().includes(plot.current_crop.toLowerCase())
     );
 
-    let status = 'healthy';
+    let status = 'unassessed';
     if (cropDiags.length > 0) {
       const latestDiag = cropDiags[0];
       if (latestDiag.status === 'problem_detected') status = 'attention';
       else if (latestDiag.status === 'uncertain') status = 'under_watch';
+      else if (latestDiag.status === 'no_issue') status = 'healthy';
     }
 
     const daysSince = plot.sowing_date 
-      ? Math.max(0, Math.floor((Date.now() - new Date(plot.sowing_date).getTime()) / 86400000))
-      : 0;
+      ? calculateCropDayIST(plot.sowing_date, getTodayISTDateString(), plot.created_at)
+      : 1;
 
     const formattedPlot = {
       id: plot.id,
@@ -435,26 +471,36 @@ export async function compareCropsWithAI({
 
   if (!env.FIREWORKS_API_KEY) {
     // If AI is unconfigured, return structured catalog items directly with explicit provenance
+    const defaultSummary = language === 'te'
+      ? 'రాష్ట్ర వ్యవసాయ విశ్వవిద్యాలయ రిఫరెన్స్ డేటాబేస్ ఆధారంగా ధృవీకరించిన పంట ఎంపికలు.'
+      : language === 'hi'
+      ? 'राज्य कृषि विश्वविद्यालय संदर्भ डेटाबेस पर आधारित सत्यापित फसल विकल्प।'
+      : 'Verified crop options based on State Agricultural University reference database.';
+
     return {
       status: 'success',
-      summary: 'Verified crop options based on State Agricultural University reference database.',
+      summary: defaultSummary,
       crops: dbCrops.map(c => ({
         id: c.id,
         cropName: c.name,
         localName: language === 'te' ? c.local_name_te : language === 'hi' ? c.local_name_hi : c.name,
         scientificName: c.scientific_name,
         suitabilityScore: 'High',
-        suitabilityReason: `Well-adapted for ${soilType} under ${irrigationSource}.`,
+        suitabilityReason: language === 'te'
+          ? `${soilType} నేల మరియు ${irrigationSource} కి అత్యంత అనుకూలమైనది.`
+          : language === 'hi'
+          ? `${soilType} मिट्टी और ${irrigationSource} के लिए उपयुक्त।`
+          : `Well-adapted for ${soilType} under ${irrigationSource}.`,
         durationDays: c.standard_duration_days || 120,
-        waterRequirement: 'Medium',
+        waterRequirement: language === 'te' ? 'మధ్యస్థం' : language === 'hi' ? 'मध्यम' : 'Medium',
         estimatedInvestmentPerAcre: { min: 25000, max: 35000, isEstimate: true },
         expectedYieldPerAcre: { minQ: 6, maxQ: 10, isEstimate: true },
-        mandiPrice: mandiRates[c.name] ? `₹${mandiRates[c.name].modalPrice}/q (${mandiRates[c.name].marketName})` : 'Data unavailable',
+        mandiPrice: mandiRates[c.name] ? `₹${mandiRates[c.name].modalPrice}/q (${mandiRates[c.name].marketName})` : (language === 'te' ? 'సమాచారం అందుబాటులో లేదు' : language === 'hi' ? 'डेटा उपलब्ध नहीं' : 'Data unavailable'),
         estimatedMarginPerAcre: { min: 5000, max: 30000, isEstimate: true, isGuaranteed: false },
-        keyRisks: ['Seasonal pest pressure', 'Monsoon dry spell'],
-        weatherSuitability: verifiedWeather ? `Optimal for current ${verifiedWeather.temperature}°C` : 'Data unavailable',
+        keyRisks: language === 'te' ? ['కాలానుగుణ పురుగుల ప్రభావం', 'వర్షాభావ పరిస్థితులు'] : ['Seasonal pest pressure', 'Monsoon dry spell'],
+        weatherSuitability: verifiedWeather ? (language === 'te' ? `ప్రస్తుత ${verifiedWeather.temperature}°C కి అనుకూలం` : `Optimal for current ${verifiedWeather.temperature}°C`) : (language === 'te' ? 'సమాచారం అందుబాటులో లేదు' : 'Data unavailable'),
         applicableSchemes: ['PM-KISAN', 'PMFBY Crop Insurance'],
-        dataSource: 'ICAR / State Agricultural University Benchmark Records',
+        dataSource: language === 'te' ? 'ICAR / రాష్ట్ర వ్యవసాయ విశ్వవిద్యాలయ ప్రమాణాలు' : 'ICAR / State Agricultural University Benchmark Records',
         lastUpdated: new Date().toISOString().split('T')[0],
       })),
       weatherContext: verifiedWeather,
@@ -462,8 +508,8 @@ export async function compareCropsWithAI({
   }
 
   const languageInstruction =
-    language === 'te' ? 'Output all summaries, reasons, and descriptions in authentic Telugu (తెలుగు).' :
-    language === 'hi' ? 'Output all summaries, reasons, and descriptions in authentic Hindi (हिन्दी).' :
+    language === 'te' ? 'CRITICAL: Output all summaries, reasons, and descriptions strictly in Telugu (తెలుగు).' :
+    language === 'hi' ? 'CRITICAL: Output all summaries, reasons, and descriptions strictly in Hindi (हिन्दी).' :
     'Output in clear, simple English for an Indian farmer.';
 
   const systemPrompt = `You are AgriGuide Agronomic Comparison Engine.
@@ -559,26 +605,46 @@ Respond with ONLY the JSON object:`;
   }
 
   // Grounded fallback from Supabase catalog
+  const fallbackSummary = language === 'te'
+    ? 'రాష్ట్ర వ్యవసాయ విశ్వవిద్యాలయ రిఫరెన్స్ డేటాబేస్ ఆధారంగా ధృవీకరించిన పంట ఎంపికలు.'
+    : language === 'hi'
+    ? 'राज्य कृषि विश्वविद्यालय संदर्भ डेटाबेस पर आधारित सत्यापित फसल विकल्प।'
+    : 'Verified crop options based on State Agricultural University reference database.';
+
   return {
     status: 'success',
-    summary: 'Verified crop options based on State Agricultural University reference database.',
+    summary: fallbackSummary,
     crops: dbCrops.map(c => ({
       id: c.id,
       cropName: c.name,
       localName: language === 'te' ? c.local_name_te : language === 'hi' ? c.local_name_hi : c.name,
       scientificName: c.scientific_name,
       suitabilityScore: 'High',
-      suitabilityReason: `Suitable for ${soilType} under ${irrigationSource}.`,
+      suitabilityReason: language === 'te'
+        ? `${soilType} నేల మరియు ${irrigationSource} కి అత్యంత అనుకూలమైనది.`
+        : language === 'hi'
+        ? `${soilType} मिट्टी और ${irrigationSource} के लिए उपयुक्त।`
+        : `Suitable for ${soilType} under ${irrigationSource}.`,
       durationDays: c.standard_duration_days || 120,
-      waterRequirement: c.name === 'Paddy' ? 'High' : c.name === 'Cotton' || c.name === 'Chilli' ? 'Medium' : 'Low',
+      waterRequirement: c.name === 'Paddy' 
+        ? (language === 'te' ? 'ఎక్కువ' : language === 'hi' ? 'उच्च' : 'High') 
+        : (c.name === 'Cotton' || c.name === 'Chilli') 
+        ? (language === 'te' ? 'మధ్యస్థం' : language === 'hi' ? 'मध्यम' : 'Medium') 
+        : (language === 'te' ? 'తక్కువ' : language === 'hi' ? 'कम' : 'Low'),
       estimatedInvestmentPerAcre: { min: 25000, max: 35000, isEstimate: true },
       expectedYieldPerAcre: { minQ: 6, maxQ: 10, isEstimate: true },
-      mandiPrice: mandiRates[c.name] ? `₹${mandiRates[c.name].modalPrice}/q` : 'Data unavailable',
+      mandiPrice: mandiRates[c.name] ? `₹${mandiRates[c.name].modalPrice}/q` : (language === 'te' ? 'సమాచారం అందుబాటులో లేదు' : language === 'hi' ? 'डेटा उपलब्ध नहीं' : 'Data unavailable'),
       estimatedMarginPerAcre: { min: 5000, max: 30000, isEstimate: true, isGuaranteed: false },
-      keyRisks: ['Monsoon dry spell', 'Pest pressure during flowering'],
-      weatherSuitability: verifiedWeather ? `Suitable for ${verifiedWeather.temperature}°C` : 'Data unavailable',
+      keyRisks: language === 'te' 
+        ? ['వర్షాభావ పరిస్థితులు', 'పూత దశలో పురుగుల ప్రభావం'] 
+        : language === 'hi' 
+        ? ['मानसून की कमी', 'फूल आने के समय कीट प्रकोप'] 
+        : ['Monsoon dry spell', 'Pest pressure during flowering'],
+      weatherSuitability: verifiedWeather 
+        ? (language === 'te' ? `ప్రస్తుత ${verifiedWeather.temperature}°C ఉష్ణోగ్రతకు అనుకూలం` : language === 'hi' ? `वर्तमान ${verifiedWeather.temperature}°C तापमान के लिए उपयुक्त` : `Suitable for ${verifiedWeather.temperature}°C`) 
+        : (language === 'te' ? 'సమాచారం అందుబాటులో లేదు' : 'Data unavailable'),
       applicableSchemes: ['PM-KISAN', 'PMFBY Crop Insurance'],
-      dataSource: 'ICAR / State Agricultural University Benchmark Records',
+      dataSource: language === 'te' ? 'ICAR / రాష్ట్ర వ్యవసాయ విశ్వవిద్యాలయ ప్రమాణాలు' : language === 'hi' ? 'आईसीएआर / राज्य कृषि विश्वविद्यालय बेंचमार्क' : 'ICAR / State Agricultural University Benchmark Records',
       lastUpdated: new Date().toISOString().split('T')[0],
     })),
     weatherContext: verifiedWeather,
@@ -642,7 +708,13 @@ Verified Crops Comparison Data: ${JSON.stringify(comparedCrops)}`;
     console.warn('[FarmService] Voice QA notice:', err.message);
   }
 
-  return { answer: 'Based on the verified data, please review the crop duration, water requirements, and estimated margins listed on your screen.' };
+  const fallbackQA = language === 'te'
+    ? 'ధృవీకరించిన వ్యవసాయ వివరాల ఆధారంగా, దయచేసి స్క్రీన్‌పై చూపిన పంట కాలపరిమితి, నీటి అవసరాలు మరియు అంచనా లాభాలను పరిశీలించండి.'
+    : language === 'hi'
+    ? 'सत्यापित कृषि विवरणों के आधार पर, कृपया स्क्रीन पर दिखाई गई फसल की अवधि, पानी की आवश्यकता और अनुमानित लाभ की समीक्षा करें।'
+    : 'Based on the verified data, please review the crop duration, water requirements, and estimated margins listed on your screen.';
+
+  return { answer: fallbackQA };
 }
 
 /**
@@ -888,19 +960,55 @@ Respond with ONLY the valid JSON object starting with { immediately:`;
 
   if (typeof planResult !== 'object' || planResult === null || !planResult.cropName) {
     console.warn('[CropPlan AI] Generating grounded benchmark structure from verified facts.');
+
+    const cropNameTeMap = {
+      'Cotton': 'పత్తి',
+      'Chilli': 'మిరప',
+      'Maize': 'మొక్కజొన్న',
+      'Paddy': 'వరి',
+      'Groundnut': 'వేరుశనగ',
+      'Tomato': 'టమాటా',
+    };
+    const cNameLoc = language === 'te' ? (cropNameTeMap[cropName] || cropName) : cropName;
+
+    const teSummary = `ధృవీకరించిన వాతావరణం మరియు మార్కెట్ ధరల ఆధారంగా ${farmName} వద్ద ${acres} ఎకరాల ${cNameLoc} (${variety || 'హైబ్రిడ్'}) పంట కోసం సమగ్ర ఉత్పత్తి ప్రణాళిక.`;
+    const hiSummary = `सत्यापित मौसम और मंडी भावों के आधार पर ${farmName} में ${acres} एकड़ ${cropName} (${variety || 'हाइब्रिड'}) के लिए व्यापक उत्पादन योजना।`;
+    const enSummary = `Comprehensive production plan for ${acres} Acres of ${cropName} (${variety || 'Hybrid'}) at ${farmName}. Grounded in verified weather and mandi economics.`;
+
+    const initialPlanTe = [
+      { stepNumber: 1, timing: 'విత్తడానికి 0 - 7 రోజుల ముందు', title: 'భూమి తయారీ & ప్రాథమిక ఎరువులు', category: 'fertilizer', actionDetails: 'నేల పరీక్ష సిఫార్సుల ప్రకారం బాగా కుళ్ళిన పశువుల ఎరువు మరియు ప్రాథమిక NPK వేయండి.', urgency: 'high' },
+      { stepNumber: 2, timing: 'విత్తే సమయంలో', title: 'విత్తన శుద్ధి & నాటడం', category: 'pest', actionDetails: 'బయో-శిలీంద్రనాశిని/పురుగుమందుతో శుద్ధి చేసిన విత్తనాలను 90x60 సెం.మీ దూరంలో నాటండి.', urgency: 'high' },
+      { stepNumber: 3, timing: 'విత్తిన 15 - 20 రోజులకు', title: 'డ్రిప్ షెడ్యూల్ & ఖాళీల పూడ్చివేత', category: 'irrigation', actionDetails: 'మొలకెత్తని ఖాళీలను పూడ్చండి మరియు రోజు విడిచి రోజు 1.5 - 2 గంటలు డ్రిప్ నడపండి.', urgency: 'medium' },
+      { stepNumber: 4, timing: 'విత్తిన 40 - 45 రోజులకు', title: 'లింగాకర్షక బుట్టల ఏర్పాటు & పైపాటు ఎరువులు', category: 'pest', actionDetails: 'ఎకరాకు 5 లింగాకర్షక బుట్టలను అమర్చి, మొదటి విడత నత్రజని పైపాటుగా వేయండి.', urgency: 'high' },
+    ];
+    const initialPlanHi = [
+      { stepNumber: 1, timing: 'बुवाई से 0 - 7 दिन पहले', title: 'भूमि की तैयारी और आधार खाद', category: 'fertilizer', actionDetails: 'मिट्टी परीक्षण के अनुसार अच्छी सड़ी गोबर की खाद और आधार एनपीके डालें।', urgency: 'high' },
+      { stepNumber: 2, timing: 'बुवाई के समय', title: 'बीज उपचार और बुवाई', category: 'pest', actionDetails: 'जैविक कवकनाशी/कीटनाशक से उपचारित बीज उचित दूरी पर लगाएं।', urgency: 'high' },
+      { stepNumber: 3, timing: 'बुवाई के 15 - 20 दिन बाद', title: 'ड्रिप शेड्यूलिंग और गैप भरना', category: 'irrigation', actionDetails: 'खाली जगहों पर पौधे लगाएं और ड्रिप 1.5 - 2 घंटे एक दिन छोड़कर चलाएं।', urgency: 'medium' },
+      { stepNumber: 4, timing: 'बुवाई के 40 - 45 दिन बाद', title: 'फेरोमोन ट्रैप और टॉप-ड्रेसिंग', category: 'pest', actionDetails: 'प्रति एकड़ 5 फेरोमोन ट्रैप लगाएं और पहली यूरिया टॉप-ड्रेसिंग करें।', urgency: 'high' },
+    ];
+    const initialPlanEn = [
+      { stepNumber: 1, timing: '0 - 7 Days Before Sowing', title: 'Soil Preparation & Basal Fertigation', category: 'fertilizer', actionDetails: 'Apply well-decomposed FYM and basal NPK dose according to soil testing recommendations.', urgency: 'high' },
+      { stepNumber: 2, timing: 'At Sowing', title: 'Treated Seed Planting', category: 'pest', actionDetails: 'Plant certified hybrid seed treated with bio-fungicide/insecticide at 90x60cm spacing.', urgency: 'high' },
+      { stepNumber: 3, timing: '15 - 20 DAS', title: 'Drip Scheduling & Gap Filling', category: 'irrigation', actionDetails: 'Fill any germination gaps and operate drip laterals for 1.5 - 2 hours alternate days.', urgency: 'medium' },
+      { stepNumber: 4, timing: '40 - 45 DAS', title: 'Pheromone Trap Setup & Top-Dressing', category: 'pest', actionDetails: 'Install 5 pink bollworm pheromone traps per acre and apply first split nitrogen top-dress.', urgency: 'high' },
+    ];
+
     planResult = {
       cropName: cropName,
-      variety: variety || 'Recommended Hybrid',
+      variety: variety || (language === 'te' ? 'సిఫార్సు చేసిన హైబ్రిడ్' : language === 'hi' ? 'अनुशंसित हाइब्रिड' : 'Recommended Hybrid'),
       acres: Number(acres) || 1.0,
-      farmContextSummary: `${acres} Acres plot at ${farmName} (${district}, ${state}) on ${soilType} with ${irrigationSource}.`,
+      farmContextSummary: language === 'te'
+        ? `${farmName} (${district}, ${state}) వద్ద ${soilType} నేలపై ${irrigationSource} తో ${acres} ఎకరాల ప్లాట్.`
+        : `${acres} Acres plot at ${farmName} (${district}, ${state}) on ${soilType} with ${irrigationSource}.`,
       recommendedPlantingWindow: sowingWindow || 'Kharif Onset (June - July)',
       expectedDurationDays: 160,
-      expectedDurationText: 'Approximately 5 to 5.5 months from sowing to final harvest',
+      expectedDurationText: language === 'te' ? 'విత్తినప్పటి నుండి పంట కోత వరకు సుమారు 5 నుండి 5.5 నెలలు' : 'Approximately 5 to 5.5 months from sowing to final harvest',
       durationMilestones: [
-        { phase: 'Land Prep & Sowing', daysRange: 'Day 0 - 15', keyAction: 'Deep ploughing and basal fertilization with drip layout' },
-        { phase: 'Vegetative Growth', daysRange: 'Day 15 - 45', keyAction: 'Weeding, thinning to single plant, first split N application' },
-        { phase: 'Flowering & Boll Formation', daysRange: 'Day 45 - 110', keyAction: 'Pheromone trap monitoring for pink bollworm; split potassium top-dressing' },
-        { phase: 'Maturity & Picking', daysRange: 'Day 110 - 160', keyAction: 'Selective dry-weather picking and clean storage' },
+        { phase: language === 'te' ? 'భూమి తయారీ & విత్తడం' : 'Land Prep & Sowing', daysRange: 'Day 0 - 15', keyAction: language === 'te' ? 'లోతు దుక్కి మరియు డ్రిప్ అమరికతో ప్రాథమిక ఎరువులు' : 'Deep ploughing and basal fertilization with drip layout' },
+        { phase: language === 'te' ? 'శాఖీయ పెరుగుదల' : 'Vegetative Growth', daysRange: 'Day 15 - 45', keyAction: language === 'te' ? 'కలుపు తీత, ఒకే మొక్క ఉండేలా పలుచన చేయడం, మొదటి విడత N వేయడం' : 'Weeding, thinning to single plant, first split N application' },
+        { phase: language === 'te' ? 'పూత & కాయ దశ' : 'Flowering & Boll Formation', daysRange: 'Day 45 - 110', keyAction: language === 'te' ? 'లింగాకర్షక బుట్టల పరిశీలన మరియు పొటాషియం పైపాటు ఎరువు' : 'Pheromone trap monitoring for pink bollworm; split potassium top-dressing' },
+        { phase: language === 'te' ? 'పక్వత & కోత' : 'Maturity & Picking', daysRange: 'Day 110 - 160', keyAction: language === 'te' ? 'పొడి వాతావరణంలో పంట తీయడం మరియు శుభ్రమైన నిల్వ' : 'Selective dry-weather picking and clean storage' },
       ],
       estimatedInvestment: {
         minPerAcre: 28000,
@@ -909,19 +1017,19 @@ Respond with ONLY the valid JSON object starting with { immediately:`;
         totalMax: Math.round(38000 * (Number(acres) || 1.0)),
         currency: 'INR',
         costBreakdown: [
-          { item: 'Certified Hybrid Seed & Sowing', costRangePerAcre: '₹1,500 - ₹2,500', basis: 'State Agricultural University cost benchmark' },
-          { item: 'Fertilizers & Micronutrients', costRangePerAcre: '₹6,000 - ₹9,000', basis: 'ICAR recommended basal and split fertigation schedule' },
-          { item: 'Plant Protection & Sticky Traps', costRangePerAcre: '₹5,000 - ₹8,000', basis: 'Benchmark for integrated pest management in Telangana' },
-          { item: 'Labour, Inter-culture & Picking', costRangePerAcre: '₹12,000 - ₹16,000', basis: 'Prevailing rural wage rates' },
+          { item: language === 'te' ? 'ధృవీకరించిన విత్తనం & విత్తడం' : 'Certified Hybrid Seed & Sowing', costRangePerAcre: '₹1,500 - ₹2,500', basis: 'State Agricultural University cost benchmark' },
+          { item: language === 'te' ? 'ఎరువులు & సూక్ష్మపోషకాలు' : 'Fertilizers & Micronutrients', costRangePerAcre: '₹6,000 - ₹9,000', basis: 'ICAR recommended basal and split fertigation schedule' },
+          { item: language === 'te' ? 'సస్యరక్షణ & జిగురు అట్టలు' : 'Plant Protection & Sticky Traps', costRangePerAcre: '₹5,000 - ₹8,000', basis: 'Benchmark for integrated pest management in Telangana' },
+          { item: language === 'te' ? 'కూలీలు & కోత ఖర్చులు' : 'Labour, Inter-culture & Picking', costRangePerAcre: '₹12,000 - ₹16,000', basis: 'Prevailing rural wage rates' },
         ],
-        disclaimer: 'ESTIMATE ONLY based on ICAR / State Agricultural University benchmarks. Not a guaranteed cost.',
+        disclaimer: language === 'te' ? 'ICAR / వ్యవసాయ విశ్వవిద్యాలయ ఆధారిత అంచనా మాత్రమే.' : 'ESTIMATE ONLY based on ICAR / State Agricultural University benchmarks. Not a guaranteed cost.',
       },
       expectedYield: {
         minQuintalsPerAcre: 8,
         maxQuintalsPerAcre: 12,
         expectedTotalQuintalsMin: Math.round(8 * (Number(acres) || 1.0)),
         expectedTotalQuintalsMax: Math.round(12 * (Number(acres) || 1.0)),
-        benchmarkSource: 'ICAR-CICR / State Agricultural University irrigated hybrid benchmark.',
+        benchmarkSource: language === 'te' ? 'ICAR-CICR / రాష్ట్ర వ్యవసాయ విశ్వవిద్యాలయ నీటిపారుదల హైబ్రిడ్ ప్రమాణాలు.' : 'ICAR-CICR / State Agricultural University irrigated hybrid benchmark.',
       },
       estimatedRevenueAndMargin: {
         mandiPriceUsedPerQuintal: verifiedMandi?.modalPrice || 7100,
@@ -931,14 +1039,26 @@ Respond with ONLY the valid JSON object starting with { immediately:`;
         estimatedNetMarginMin: Math.round((8 * (Number(acres) || 1.0) * (verifiedMandi?.modalPrice || 7100)) - (38000 * (Number(acres) || 1.0))),
         estimatedNetMarginMax: Math.round((12 * (Number(acres) || 1.0) * (verifiedMandi?.modalPrice || 7100)) - (28000 * (Number(acres) || 1.0))),
         isProfitGuaranteed: false,
-        marginNote: 'ESTIMATE ONLY. Profit is NOT guaranteed. Net returns depend on monsoon rainfall distribution, pest pressure, and market arrivals.',
+        marginNote: language === 'te' 
+          ? 'అంచనా మాత్రమే. లాభం హామీ ఇవ్వబడదు. నికర రాబడి వర్షపాతం, తెగుళ్ల ప్రభావం మరియు మార్కెట్ ధరలపై ఆధారపడి ఉంటుంది.'
+          : language === 'hi'
+          ? 'केवल अनुमान। लाभ की गारंटी नहीं है। शुद्ध आय वर्षा, कीट प्रभाव और मंडी भाव पर निर्भर करती है।'
+          : 'ESTIMATE ONLY. Profit is NOT guaranteed. Net returns depend on monsoon rainfall distribution, pest pressure, and market arrivals.',
       },
-      weatherConsiderations: [
+      weatherConsiderations: language === 'te' ? [
+        'నేలలో తగినంత తేమ చేరిన తర్వాత మాత్రమే విత్తనాలు నాటండి.',
+        'పూత మరియు కాయ దశలో బెట్ట పరిస్థితులను ఎదుర్కోవడానికి డ్రిప్ ఇరిగేషన్ ఉపయోగించండి.',
+        'భారీ ఈదురు గాలులు లేదా వర్షం సూచన ఉన్నప్పుడు పిచికారీ చేయవద్దు.',
+      ] : [
         'Sow only after monsoon onset once soil reaches optimal moisture.',
         'Use drip irrigation during dry spells to safeguard flowering and boll development.',
         'Avoid foliar sprays during heavy wind or expected rain showers.',
       ],
-      criticalAgronomicRisks: [
+      criticalAgronomicRisks: language === 'te' ? [
+        { risk: 'గులాబీ రంగు కాయతొలుచు పురుగు', severity: 'high', preventiveAction: '40 రోజుల నుండి ఎకరాకు 5 లింగాకర్షక బుట్టలు అమర్చి గమనించండి' },
+        { risk: 'రసం పీల్చే పురుగులు (తెల్లదోమ/తామర పురుగులు)', severity: 'medium', preventiveAction: 'పసుపు రంగు జిగురు అట్టలు ఏర్పాటు చేసి అధిక నత్రజని వాడకాన్ని తగ్గించండి' },
+        { risk: 'భారీ వర్షాలకు నీరు నిలవడం', severity: 'medium', preventiveAction: 'చేనులో నీరు నిలవకుండా కాలువల ద్వారా బయటకు పంపించండి' },
+      ] : [
         { risk: 'Pink Bollworm Infestation', severity: 'high', preventiveAction: 'Install pheromone traps @ 5/acre from 40 DAS and scout rosette flowers' },
         { risk: 'Sucking Pests (Whitefly/Thrips)', severity: 'medium', preventiveAction: 'Install yellow sticky traps and avoid excess nitrogen fertilization' },
         { risk: 'Waterlogging in Heavy Downpours', severity: 'medium', preventiveAction: 'Maintain drainage channels along plot contours' },
@@ -947,13 +1067,8 @@ Respond with ONLY the valid JSON object starting with { immediately:`;
         { schemeName: 'PM-KISAN', benefitSummary: '₹6,000 annual direct income support in three installments', howToApply: 'Register via pmkisan.gov.in or local CSC center' },
         { schemeName: 'PMFBY (Crop Insurance)', benefitSummary: 'Comprehensive crop insurance against drought, flood and localized pest failure', howToApply: 'Enroll via bank or pmfby.gov.in before cutoff date' },
       ],
-      initialCropManagementPlan: [
-        { stepNumber: 1, timing: '0 - 7 Days Before Sowing', title: 'Soil Preparation & Basal Fertigation', category: 'fertilizer', actionDetails: 'Apply well-decomposed FYM and basal NPK dose according to soil testing recommendations.', urgency: 'high' },
-        { stepNumber: 2, timing: 'At Sowing', title: 'Treated Seed Planting', category: 'pest', actionDetails: 'Plant certified hybrid seed treated with bio-fungicide/insecticide at 90x60cm spacing.', urgency: 'high' },
-        { stepNumber: 3, timing: '15 - 20 DAS', title: 'Drip Scheduling & Gap Filling', category: 'irrigation', actionDetails: 'Fill any germination gaps and operate drip laterals for 1.5 - 2 hours alternate days.', urgency: 'medium' },
-        { stepNumber: 4, timing: '40 - 45 DAS', title: 'Pheromone Trap Setup & Top-Dressing', category: 'pest', actionDetails: 'Install 5 pink bollworm pheromone traps per acre and apply first split nitrogen top-dress.', urgency: 'high' },
-      ],
-      summary: `Comprehensive production plan for ${acres} Acres of ${cropName} (${variety || 'Hybrid'}) at ${farmName}. Grounded in verified weather and mandi economics.`,
+      initialCropManagementPlan: language === 'te' ? initialPlanTe : language === 'hi' ? initialPlanHi : initialPlanEn,
+      summary: language === 'te' ? teSummary : language === 'hi' ? hiSummary : enSummary,
     };
   }
 
@@ -1045,9 +1160,6 @@ export async function acceptCropPlan({
         user_id: userId,
         farm_name: farmName || 'My Farm',
         total_acres: farmAcres,
-        district: district || 'Warangal',
-        state: state || 'Telangana',
-        village: village || '',
         soil_type: soilType || 'Red Loamy Soil',
         irrigation_source: irrigationSource || 'Borewell',
       })
@@ -1059,6 +1171,18 @@ export async function acceptCropPlan({
       error.statusCode = 500;
       throw error;
     }
+
+    // Sync location to profiles table if available
+    try {
+      await supabase
+        .from('profiles')
+        .update({
+          district: district || 'Warangal',
+          state: state || 'Telangana',
+          village: village || '',
+        })
+        .eq('id', userId);
+    } catch (_) {}
 
     targetFarmId = createdFarm.id;
   }
@@ -1075,7 +1199,7 @@ export async function acceptCropPlan({
         acres: requestedAcres,
         current_crop: currentCrop,
         variety: variety || 'Standard Variety',
-        sowing_date: sowingDate || new Date().toISOString().split('T')[0],
+        sowing_date: sowingDate || getTodayISTDateString(),
         stage: stage || 'Planned / Sowing Stage',
       })
       .select()
@@ -1096,36 +1220,51 @@ export async function acceptCropPlan({
       acres: requestedAcres,
       current_crop: currentCrop,
       variety: variety || '',
-      sowing_date: sowingDate || new Date().toISOString().split('T')[0],
+      sowing_date: sowingDate || getTodayISTDateString(),
       stage: stage || 'Planned / Sowing Stage',
     };
   }
 
-  // 4. Insert initial crop management recommendations
+  // 4. Insert initial crop management recommendations & generate 15-day timeline
   const createdRecs = [];
-  if (isSupabaseConfigured() && userId && initialManagementPlan && initialManagementPlan.length > 0) {
-    for (const step of initialManagementPlan.slice(0, 4)) {
-      try {
-        const { data: rec, error } = await supabase
-          .from('recommendations')
-          .insert({
-            user_id: userId,
-            action_title: step.title,
-            crop_target: currentCrop,
-            reason: `${step.timing}: ${step.actionDetails}`,
-            deadline: step.timing,
-            urgency: step.urgency || 'medium',
-            category: step.category || 'fertilizer',
-            weather_context: 'Plan created from agronomic advisory',
-            source: 'AgriGuide Crop Planning System',
-            is_completed: false,
-          })
-          .select()
-          .single();
+  if (isSupabaseConfigured() && userId) {
+    try {
+      const dailyActivityWindow = await getCropDailyActivities({
+        plotId: plot.id,
+        user,
+        windowDays: 15,
+      });
+      if (dailyActivityWindow && dailyActivityWindow.todayTasks) {
+        createdRecs.push(...dailyActivityWindow.todayTasks);
+      }
+    } catch (actErr) {
+      console.warn('[FarmService] Daily activity pre-generation warning:', actErr.message);
+      // Fallback to initialManagementPlan if provided
+      if (initialManagementPlan && initialManagementPlan.length > 0) {
+        for (const step of initialManagementPlan.slice(0, 4)) {
+          try {
+            const { data: rec, error } = await supabase
+              .from('recommendations')
+              .insert({
+                user_id: userId,
+                action_title: step.title,
+                crop_target: currentCrop,
+                reason: `${step.timing}: ${step.actionDetails}`,
+                deadline: step.timing,
+                urgency: step.urgency || 'medium',
+                category: step.category || 'fertilizer',
+                weather_context: 'Plan created from agronomic advisory',
+                source: 'AgriGuide Crop Planning System',
+                is_completed: false,
+              })
+              .select()
+              .single();
 
-        if (!error && rec) createdRecs.push(rec);
-      } catch (rErr) {
-        console.warn('[FarmService] Recommendation insert notice:', rErr.message);
+            if (!error && rec) createdRecs.push(rec);
+          } catch (rErr) {
+            console.warn('[FarmService] Recommendation insert notice:', rErr.message);
+          }
+        }
       }
     }
   }
@@ -1136,5 +1275,145 @@ export async function acceptCropPlan({
     plot,
     installedRecommendations: createdRecs,
     message: `Successfully started ${currentCrop} crop on ${requestedAcres} acres.`,
+  };
+}
+
+/**
+ * Get all real recommendations/activities for the authenticated farmer
+ */
+export async function getRecommendationsForUser(user) {
+  const userId = user?.id || null;
+  if (!isSupabaseConfigured() || !userId) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from('recommendations')
+    .select('*')
+    .eq('user_id', userId)
+    .order('is_completed', { ascending: true })
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.warn('[FarmService] Error fetching recommendations:', error.message);
+    return [];
+  }
+
+  return (data || []).map(r => ({
+    id: r.id,
+    userId: r.user_id,
+    title: r.action_title,
+    actionTitle: r.action_title,
+    cropTarget: r.crop_target,
+    reason: r.reason,
+    deadline: r.deadline,
+    urgency: r.urgency || 'medium',
+    category: r.category || 'general',
+    weatherContext: r.weather_context,
+    source: r.source || 'Agronomic Plan',
+    isCompleted: Boolean(r.is_completed),
+    createdAt: r.created_at,
+  }));
+}
+
+/**
+ * Toggle or mark a recommendation/activity as complete
+ */
+export async function completeRecommendation(recommendationId, user, isCompleted = true) {
+  const userId = user?.id || null;
+  if (!isSupabaseConfigured() || !userId) {
+    return { success: false, message: 'Database or user not configured' };
+  }
+
+  const { data, error } = await supabase
+    .from('recommendations')
+    .update({ is_completed: isCompleted })
+    .eq('id', recommendationId)
+    .eq('user_id', userId)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('[FarmService] Error updating recommendation:', error.message);
+    throw new Error(`Failed to update activity: ${error.message}`);
+  }
+
+  return {
+    success: true,
+    data: {
+      id: data.id,
+      isCompleted: Boolean(data.is_completed),
+      actionTitle: data.action_title,
+    },
+  };
+}
+
+/**
+ * Get current farmer profile
+ */
+export async function getFarmerProfileForUser(user) {
+  const userId = user?.id || null;
+  if (!isSupabaseConfigured() || !userId) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return {
+    id: data.id,
+    phone: data.phone,
+    fullName: data.full_name || '',
+    state: data.state || '',
+    district: data.district || '',
+    village: data.village || '',
+    preferredLanguage: data.preferred_language || 'en',
+    createdAt: data.created_at,
+  };
+}
+
+/**
+ * Update farmer profile
+ */
+export async function updateFarmerProfile(user, updates = {}) {
+  const userId = user?.id || null;
+  if (!isSupabaseConfigured() || !userId) {
+    throw new Error('Authenticated farmer session required');
+  }
+
+  const updatePayload = {};
+  if (updates.fullName !== undefined) updatePayload.full_name = updates.fullName;
+  if (updates.preferredLanguage !== undefined) updatePayload.preferred_language = updates.preferredLanguage;
+  if (updates.village !== undefined) updatePayload.village = updates.village;
+  if (updates.district !== undefined) updatePayload.district = updates.district;
+  if (updates.state !== undefined) updatePayload.state = updates.state;
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .update(updatePayload)
+    .eq('id', userId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update profile: ${error.message}`);
+  }
+
+  return {
+    id: data.id,
+    phone: data.phone,
+    fullName: data.full_name || '',
+    state: data.state || '',
+    district: data.district || '',
+    village: data.village || '',
+    preferredLanguage: data.preferred_language || 'en',
+    updatedAt: data.updated_at,
   };
 }

@@ -2,6 +2,78 @@ import * as cropDiagnosisService from '../services/crop/cropDiagnosisService.js'
 import * as whisperService from '../services/voice/whisperService.js';
 import { supabase, isSupabaseConfigured, getOrCreateDefaultFarmerUser } from '../config/supabase.js';
 
+export async function investigateCrop(req, res, next) {
+  try {
+    const files = req.files || [];
+    const imageFiles = files.filter(f => f.mimetype.startsWith('image/') || f.fieldname === 'images' || f.fieldname === 'image');
+    const audioFile = files.find(f => f.mimetype.startsWith('audio/') || f.fieldname === 'audio');
+
+    if (imageFiles.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'IMAGES_REQUIRED',
+          message: 'At least one crop photo (1 to 5 images) is required for investigation.',
+        },
+      });
+    }
+
+    const { cropName = 'Cotton', language = 'en', voiceDescription, conversationHistory: rawHistory, farmerContext } = req.body;
+
+    let conversationHistory = [];
+    if (rawHistory) {
+      try {
+        conversationHistory = typeof rawHistory === 'string' ? JSON.parse(rawHistory) : rawHistory;
+      } catch (err) {
+        console.warn('[CropController] Error parsing conversationHistory:', err.message);
+      }
+    }
+
+    // Transcribe initial voice audio if attached
+    let voiceTranscript = voiceDescription || null;
+    let whisperLatencyMs = 0;
+    if (audioFile) {
+      try {
+        const t0_whisper = performance.now();
+        const whisperResult = await whisperService.transcribeAudio({
+          fileBuffer: audioFile.buffer,
+          mimeType: audioFile.mimetype,
+          language,
+          filename: audioFile.originalname || 'voice_initial.webm',
+        });
+        const t1_whisper = performance.now();
+        whisperLatencyMs = Math.round(t1_whisper - t0_whisper);
+
+        if (whisperResult.text && whisperResult.text.trim().length > 0) {
+          voiceTranscript = whisperResult.text.trim();
+        }
+      } catch (whisperErr) {
+        console.warn('[CropController] Whisper voice transcription notice:', whisperErr.message);
+      }
+    }
+
+    const result = await cropDiagnosisService.investigateCropPhotos({
+      images: imageFiles,
+      cropName,
+      language,
+      voiceTranscript,
+      conversationHistory,
+      farmerContext,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        ...result,
+        voiceTranscript,
+        whisperLatencyMs,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function diagnoseCrop(req, res, next) {
   try {
     const files = req.files || [];
@@ -20,12 +92,23 @@ export async function diagnoseCrop(req, res, next) {
       });
     }
 
-    const { cropName, language = 'en', voiceDescription, farmerContext } = req.body;
+    const { cropName, language = 'en', voiceDescription, consultationQnA: rawQnA, conversationHistory: rawHistory, farmerContext } = req.body;
+
+    let consultationQnA = [];
+    const sourceQnA = rawQnA || rawHistory;
+    if (sourceQnA) {
+      try {
+        consultationQnA = typeof sourceQnA === 'string' ? JSON.parse(sourceQnA) : sourceQnA;
+      } catch (err) {
+        console.warn('[CropController] Error parsing consultationQnA:', err.message);
+      }
+    }
 
     console.log('[CropDoctor] authenticated user:', req.user ? req.user.id : 'MISSING (Will resolve default farmer)');
     console.log('[CropDoctor] image count:', imageFiles.length);
     console.log('[CropDoctor] crop:', cropName || 'Cotton');
     console.log('[CropDoctor] language:', language);
+    console.log('[CropDoctor] consultation Q&A count:', consultationQnA.length);
 
     // 1. Transcribe voice audio if provided
     let voiceTranscript = voiceDescription || null;
@@ -60,6 +143,7 @@ export async function diagnoseCrop(req, res, next) {
       voiceTranscript,
       cropName: cropName || 'Cotton',
       language,
+      consultationQnA,
       farmerContext,
       user: req.user || null,
       audioFile,
@@ -120,10 +204,15 @@ export async function getCropDiagnoses(req, res, next) {
       });
     }
 
-    let userId = req.user?.id;
+    const userId = req.user?.id;
     if (!userId) {
-      userId = await getOrCreateDefaultFarmerUser();
+      return res.json({
+        success: true,
+        data: [],
+      });
     }
+
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
     let query = supabase
       .from('crop_diagnoses')
@@ -154,12 +243,10 @@ export async function getCropDiagnoses(req, res, next) {
         model_name,
         created_at
       `)
+      .eq('user_id', userId)
+      .gte('created_at', thirtyDaysAgo)
       .order('created_at', { ascending: false })
       .limit(30);
-
-    if (userId) {
-      query = query.eq('user_id', userId);
-    }
 
     const { data: diagnoses, error } = await query;
     if (error) throw error;
@@ -207,6 +294,8 @@ export async function getCropDiagnoses(req, res, next) {
                 imageIndex: img.image_index,
                 storagePath: img.storage_path,
                 previewUrl: signed.signedUrl,
+                signedUrl: signed.signedUrl,
+                url: signed.signedUrl,
               });
               if (!thumbnailSignedUrl) {
                 thumbnailSignedUrl = signed.signedUrl;
@@ -263,16 +352,21 @@ export async function getCropDiagnosisById(req, res, next) {
       });
     }
 
-    const { data: diag, error } = await supabase
+    let query = supabase
       .from('crop_diagnoses')
       .select('*')
-      .eq('id', id)
-      .single();
+      .eq('id', id);
+
+    if (req.user?.id) {
+      query = query.eq('user_id', req.user.id);
+    }
+
+    const { data: diag, error } = await query.single();
 
     if (error || !diag) {
       return res.status(404).json({
         success: false,
-        error: { message: 'Crop diagnosis record not found.' },
+        error: { message: 'Crop diagnosis record not found or access unauthorized.' },
       });
     }
 
@@ -294,6 +388,8 @@ export async function getCropDiagnosisById(req, res, next) {
             imageIndex: img.image_index,
             storagePath: img.storage_path,
             previewUrl: signed.signedUrl,
+            signedUrl: signed.signedUrl,
+            url: signed.signedUrl,
             name: `Photo #${img.image_index + 1}`,
           });
         }

@@ -78,21 +78,21 @@ export const FireworksService = {
         urgency: raw.urgency || 'medium',
         category: raw.category || 'pest',
         weatherContext: raw.weatherContext || (weather ? `${weather.temperature}°C · ${weather.conditionText}` : 'Field Monitored'),
-        source: response.data.source || `AgriGuide AI (${response.data.model || 'Fireworks AI'})`,
+        source: response.data.source || 'AgriGuide Advisory Guidance',
         isCompleted: false,
       };
 
       return {
         decision: todayDecision,
         status: response.data.status === 'unconfigured' ? 'unconfigured' : 'success',
-        source: response.data.source || `Fireworks AI (${response.data.model || 'LLM'})`,
+        source: response.data.source || 'AgriGuide Advisory Guidance',
       };
     } catch (e: any) {
       console.warn('[FireworksService] Node backend advisory call notice:', e.message);
       return {
         decision: null,
         status: 'error',
-        source: 'Fireworks AI (Offline)',
+        source: 'AgriGuide Advisory Guidance (Offline)',
       };
     }
   }

@@ -8,7 +8,9 @@ import type {
   TodayDecision,
   AlertNotification,
   DesktopNavTab,
-  NavTab
+  NavTab,
+  Farm,
+  FarmerProfile,
 } from '../types';
 import { TopBar } from '../components/ui/TopBar';
 import { DesktopHeader } from '../components/ui/DesktopHeader';
@@ -19,8 +21,9 @@ import { ImportantAlertBanner } from '../components/agri/ImportantAlertBanner';
 import { WeatherAdvisoryCard } from '../components/agri/WeatherAdvisoryCard';
 import { CropHealthCard } from '../components/agri/CropHealthCard';
 import { MandiPriceCard } from '../components/agri/MandiPriceCard';
+import { MandiFullExperience } from '../components/agri/MandiFullExperience';
+import { MoneySchemesFullExperience } from '../components/schemes/MoneySchemesFullExperience';
 import { AlertsSection } from '../components/agri/AlertsSection';
-import { QuickActions } from '../components/ui/QuickActions';
 import { BottomNavigation } from '../components/ui/BottomNavigation';
 import { MyFarmView } from '../components/farm/MyFarmView';
 import { SevenDayForecastModal } from '../components/weather/SevenDayForecastModal';
@@ -28,24 +31,16 @@ import { LocationService } from '../services/location/locationService';
 import { WeatherService } from '../services/weather/weatherService';
 import { MarketService } from '../services/market/marketService';
 import { CropHealthService } from '../services/crop/cropHealthService';
+import { FarmService } from '../services/farm/farmService';
+import { CropDailyActivityService } from '../services/crop/cropActivityService';
 import { DecisionEngine } from '../services/decision/decisionEngine';
 import { CacheService } from '../services/cacheService';
 import { SupabaseService } from '../services/supabase/supabaseClient';
 import { translations } from '../i18n/translations';
+import { localizeCropName, localizeLocation } from '../i18n/agriLocalization';
 import { ArrowLeft } from 'lucide-react';
 import { FarmerLoginModal } from '../components/auth/FarmerLoginModal';
-import type { FarmerProfile } from '../types';
-
-const SAMPLE_ALERTS: AlertNotification[] = [
-  {
-    id: 'alert_whitefly_01',
-    title: 'Adjoining Mandal Pest Alert',
-    description: 'Whitefly & Jassid incidence reported in adjoining Geesugonda & Wardhannapet fields. Regular scouting recommended today.',
-    severity: 'warning',
-    issuedAt: 'Today, 8:00 AM',
-    source: 'PJTSAU Agricultural Extension',
-  }
-];
+import { LandingPageExplainer } from '../components/landing/LandingPageExplainer';
 
 export const HomeScreen: React.FC = () => {
   const [currentLang, setCurrentLang] = useState<Language>('en');
@@ -61,12 +56,16 @@ export const HomeScreen: React.FC = () => {
   const [showLoginModal, setShowLoginModal] = useState<boolean>(false);
   const [farmerProfile, setFarmerProfile] = useState<FarmerProfile | null>(() => {
     try {
-      const saved = localStorage.getItem('ag_active_farmer_profile');
+      const saved = localStorage.getItem('agriguide_farmer_profile') || localStorage.getItem('ag_active_farmer_profile');
       return saved ? JSON.parse(saved) : null;
     } catch {
       return null;
     }
   });
+
+  // Farms & Alerts state (Real Supabase Data)
+  const [farms, setFarms] = useState<Farm[]>([]);
+  const [alerts, setAlerts] = useState<AlertNotification[]>([]);
 
   // Weather & Mandi state
   const [weather, setWeather] = useState<WeatherData | null>(null);
@@ -85,16 +84,35 @@ export const HomeScreen: React.FC = () => {
 
   const t = translations[currentLang];
 
-  // Load Supabase crop observations & farmer profile on mount
-  useEffect(() => {
-    let isMounted = true;
-    CropHealthService.getCropHealthRecords().then((records) => {
-      if (isMounted && records.length > 0) {
-        setCrops(records);
+  // Refresh profile, farms & real alerts on identity change or mount
+  const refreshFarmerContext = useCallback(async () => {
+    try {
+      const [profile, farmList, cropRecords, alertList] = await Promise.all([
+        FarmService.getFarmerProfile(),
+        FarmService.getFarms(),
+        CropHealthService.getCropHealthRecords(),
+        CropDailyActivityService.getFarmerAlerts(),
+      ]);
+
+      if (profile) {
+        setFarmerProfile(profile);
+        localStorage.setItem('agriguide_farmer_profile', JSON.stringify(profile));
+        if (profile.preferredLanguage && ['en', 'te', 'hi'].includes(profile.preferredLanguage)) {
+          setCurrentLang(profile.preferredLanguage as Language);
+        }
       }
-    });
-    return () => { isMounted = false; };
+      setFarms(farmList);
+      setCrops(cropRecords);
+      setAlerts(alertList);
+    } catch (err) {
+      console.warn('[HomeScreen] Error refreshing farmer context:', err);
+    }
   }, []);
+
+
+  useEffect(() => {
+    refreshFarmerContext();
+  }, [refreshFarmerContext]);
 
   // Viewport resize listener for adaptive responsive experience
   useEffect(() => {
@@ -175,12 +193,27 @@ export const HomeScreen: React.FC = () => {
     setCrops(CropHealthService.getCropHealthRecordsSync());
   };
 
+  const handleSwitchFarmer = () => {
+    setFarmerProfile(null);
+    setFarms([]);
+    setCrops([]);
+    localStorage.removeItem('agriguide_farmer_profile');
+    localStorage.removeItem('agriguide_farmer_phone');
+    localStorage.removeItem('ag_active_farmer_profile');
+  };
+
   // Dedicated Tab Navigation Handlers
   const navigateToTab = (tab: DesktopNavTab) => {
     setActiveDesktopTab(tab);
     setActiveMobileTab(tab as NavTab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  const totalAcres = farms.reduce((sum, f) => sum + (Number(f.totalAcres) || 0), 0);
+  const allUniqueCrops = [...new Set(farms.flatMap(f => (f.plots || []).map((p: any) => p.currentCrop)))];
+  const farmSummaryText = farms.length > 0 
+    ? `${totalAcres} ${t.acresUnit || 'Acres'}${allUniqueCrops.length > 0 ? ` · ${allUniqueCrops.map(c => localizeCropName(c, currentLang)).join(' & ')}` : ''}`
+    : t.farmSummary;
 
   // =========================================================================
   // DESKTOP EXPERIENCE (>= 768px) — REFINED DAILY DECISION CENTER
@@ -207,16 +240,38 @@ export const HomeScreen: React.FC = () => {
         />
 
         {/* Main Centered Container */}
-        <main className="ag-desktop-container" style={{ maxWidth: '1180px', paddingTop: '28px' }}>
+        <main className="ag-desktop-container" style={{ maxWidth: '1240px', paddingTop: '20px' }}>
           {activeDesktopTab === 'home' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
-              {/* 1. Calm Greeting & Farm Context */}
-              <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'flex-end',
-                paddingBottom: '4px',
-              }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+              {/* Feature Tour & Value Proposition Explainer (Matches inspiration design) */}
+              <LandingPageExplainer
+                currentLang={currentLang}
+                onNavigateTab={navigateToTab}
+                onScrollToDashboard={() => {
+                  const el = document.getElementById('live-farm-dashboard');
+                  if (el) el.scrollIntoView({ behavior: 'smooth' });
+                }}
+              />
+
+              {/* Today's Live Farm Decision Center (Live weather, smart advisory & mandi) */}
+              <div 
+                id="live-farm-dashboard" 
+                style={{ 
+                  scrollMarginTop: '80px', 
+                  paddingTop: '24px', 
+                  borderTop: '2px dashed var(--ag-border-default)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '24px',
+                }}
+              >
+                {/* 1. Calm Greeting & Farm Context */}
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'flex-end',
+                  paddingBottom: '4px',
+                }}>
                 <div>
                   <div style={{
                     fontSize: '13px',
@@ -243,7 +298,7 @@ export const HomeScreen: React.FC = () => {
                     fontWeight: 500,
                     marginTop: '4px',
                   }}>
-                    {t.farmSummary} • {location.district}, {location.state}
+                    {farmSummaryText} • {localizeLocation(location.district, location.state, currentLang)}
                   </p>
                 </div>
 
@@ -300,6 +355,7 @@ export const HomeScreen: React.FC = () => {
                   loading={marketsLoading}
                   error={marketsError}
                   currentLang={currentLang}
+                  onNavigateMandi={() => navigateToTab('mandi')}
                 />
               </div>
 
@@ -308,6 +364,8 @@ export const HomeScreen: React.FC = () => {
                 crops={crops}
                 currentLang={currentLang}
                 onCropUpdate={handleCropUpdate}
+                isHomeWidget={true}
+                onNavigateToDoctor={() => navigateToTab('doctor')}
               />
 
               {/* 6. Voice Assistant ("Ask AgriGuide" prominent & elegant) */}
@@ -317,35 +375,38 @@ export const HomeScreen: React.FC = () => {
 
               {/* 7. Important Alert (Only rendered when real alert exists) */}
               <ImportantAlertBanner
-                alerts={SAMPLE_ALERTS}
+                alerts={alerts}
                 currentLang={currentLang}
                 onViewAlert={() => navigateToTab('alerts')}
               />
+              </div>
             </div>
           ) : (
             /* Dedicated Screen Views When Navigated From Tabs/Doorways */
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                <button
-                  onClick={() => navigateToTab('home')}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    padding: '8px 14px',
-                    borderRadius: 'var(--ag-radius-md)',
-                    backgroundColor: 'var(--ag-color-surface-base)',
-                    border: '1px solid var(--ag-border-default)',
-                    fontSize: '13px',
-                    fontWeight: 700,
-                    color: 'var(--ag-color-primary-base)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <ArrowLeft size={16} />
-                  <span>Back to Home</span>
-                </button>
-              </div>
+              {activeDesktopTab !== 'money' && activeDesktopTab !== 'mandi' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+                  <button
+                    onClick={() => navigateToTab('home')}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      padding: '8px 14px',
+                      borderRadius: 'var(--ag-radius-md)',
+                      backgroundColor: 'var(--ag-color-surface-base)',
+                      border: '1px solid var(--ag-border-default)',
+                      fontSize: '13px',
+                      fontWeight: 700,
+                      color: 'var(--ag-color-primary-base)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <ArrowLeft size={16} />
+                    <span>{currentLang === 'te' ? 'హోమ్‌కు తిరిగి వెళ్లండి' : (currentLang === 'hi' ? 'मुख्य पृष्ठ पर लौटें' : 'Back to Home')}</span>
+                  </button>
+                </div>
+              )}
 
               {activeDesktopTab === 'farm' && (
                 <MyFarmView
@@ -364,28 +425,41 @@ export const HomeScreen: React.FC = () => {
               )}
 
               {activeDesktopTab === 'mandi' && (
-                <MandiPriceCard
+                <MandiFullExperience
                   markets={markets}
                   loading={marketsLoading}
                   error={marketsError}
                   currentLang={currentLang}
+                  location={location}
+                  farmerCrops={crops}
+                  farms={farms}
+                  farmerProfile={farmerProfile}
+                  onRefresh={() => loadLiveData(location)}
                 />
               )}
 
               {activeDesktopTab === 'alerts' && (
                 <AlertsSection
-                  alerts={SAMPLE_ALERTS}
+                  alerts={alerts}
                   currentLang={currentLang}
+                  crops={crops}
+                  farms={farms}
+                  markets={markets}
+                  farmerProfile={farmerProfile}
+                  onNavigateTab={navigateToTab}
+                  onRefreshAlerts={refreshFarmerContext}
                 />
               )}
 
               {activeDesktopTab === 'money' && (
-                <div>
-                  <h3 style={{ fontSize: '18px', fontWeight: 800, marginBottom: '14px', color: 'var(--ag-color-text-primary)' }}>
-                    Government Schemes & Agricultural Credit
-                  </h3>
-                  <QuickActions currentLang={currentLang} />
-                </div>
+                <MoneySchemesFullExperience
+                  currentLang={currentLang}
+                  farmerProfile={farmerProfile}
+                  farms={farms}
+                  onNavigateTab={(tab) => {
+                    setActiveDesktopTab(tab as any);
+                  }}
+                />
               )}
             </div>
           )}
@@ -405,7 +479,12 @@ export const HomeScreen: React.FC = () => {
           isOpen={showLoginModal}
           onClose={() => setShowLoginModal(false)}
           currentLang={currentLang}
-          onSuccess={(profile) => setFarmerProfile(profile)}
+          activeProfile={farmerProfile}
+          onSwitchFarmer={handleSwitchFarmer}
+          onSuccess={(profile) => {
+            setFarmerProfile(profile);
+            refreshFarmerContext();
+          }}
         />
       </div>
     );
@@ -439,9 +518,27 @@ export const HomeScreen: React.FC = () => {
       {/* Main Mobile Content */}
       <main style={{ flex: 1, paddingBottom: '88px', paddingLeft: '16px', paddingRight: '16px' }}>
         {activeMobileTab === 'home' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '18px', paddingTop: '12px' }}>
-            {/* Crisp Decision Focus Question */}
-            <div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', paddingTop: '12px' }}>
+            {/* Landing Page Explainer for Mobile */}
+            <LandingPageExplainer
+              currentLang={currentLang}
+              onNavigateTab={(tab) => {
+                if (tab === 'doctor') setActiveMobileTab('doctor');
+                else if (tab === 'farm') setActiveMobileTab('farm');
+                else if (tab === 'mandi') setActiveMobileTab('mandi');
+                else if (tab === 'alerts') setActiveMobileTab('alerts');
+                else setActiveMobileTab('home');
+              }}
+              onScrollToDashboard={() => {
+                const el = document.getElementById('mobile-live-dashboard');
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+              }}
+            />
+
+            {/* Live Advisory Dashboard for Mobile */}
+            <div id="mobile-live-dashboard" style={{ display: 'flex', flexDirection: 'column', gap: '18px', paddingTop: '16px', borderTop: '2px dashed var(--ag-border-default)' }}>
+              {/* Crisp Decision Focus Question */}
+              <div>
               <h2 style={{
                 fontSize: '20px',
                 fontWeight: 800,
@@ -449,8 +546,18 @@ export const HomeScreen: React.FC = () => {
                 letterSpacing: '-0.01em',
                 lineHeight: 1.2,
               }}>
-                {t.heroGreetingSubtitle}
+                {farmerProfile?.fullName && farmerProfile.fullName !== 'Farmer'
+                  ? (currentLang === 'te' ? `${farmerProfile.fullName} గారి వ్యవసాయ కేంద్రం` : currentLang === 'hi' ? `${farmerProfile.fullName} जी का कृषि केंद्र` : `${farmerProfile.fullName}'s Decision Center`)
+                  : t.heroGreetingSubtitle}
               </h2>
+              <p style={{
+                fontSize: '12px',
+                color: 'var(--ag-color-text-secondary)',
+                fontWeight: 500,
+                marginTop: '2px',
+              }}>
+                {farmSummaryText} • {localizeLocation(location.district, location.state, currentLang)}
+              </p>
             </div>
 
             {/* 2. Today's Priority Decision */}
@@ -489,6 +596,8 @@ export const HomeScreen: React.FC = () => {
               crops={crops}
               currentLang={currentLang}
               onCropUpdate={handleCropUpdate}
+              isHomeWidget={true}
+              onNavigateToDoctor={() => setActiveMobileTab('doctor')}
             />
 
             {/* 6. Mandi Price Card */}
@@ -497,6 +606,7 @@ export const HomeScreen: React.FC = () => {
               loading={marketsLoading}
               error={marketsError}
               currentLang={currentLang}
+              onNavigateMandi={() => setActiveMobileTab('mandi')}
             />
 
             {/* 7. Voice Action Assistant */}
@@ -506,34 +616,37 @@ export const HomeScreen: React.FC = () => {
 
             {/* 8. Important Alert (if active) */}
             <ImportantAlertBanner
-              alerts={SAMPLE_ALERTS}
+              alerts={alerts}
               currentLang={currentLang}
               onViewAlert={() => setActiveMobileTab('alerts')}
             />
+            </div>
           </div>
         ) : (
           /* Dedicated Mobile Tab Content */
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', paddingTop: '16px' }}>
-            <button
-              onClick={() => setActiveMobileTab('home')}
-              style={{
-                alignSelf: 'flex-start',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '4px',
-                padding: '6px 12px',
-                borderRadius: 'var(--ag-radius-sm)',
-                backgroundColor: 'var(--ag-color-surface-base)',
-                border: '1px solid var(--ag-border-default)',
-                fontSize: '12px',
-                fontWeight: 700,
-                color: 'var(--ag-color-primary-base)',
-                cursor: 'pointer',
-              }}
-            >
-              <ArrowLeft size={14} />
-              <span>Back to Decision Center</span>
-            </button>
+            {activeMobileTab !== 'money' && activeMobileTab !== 'mandi' && (
+              <button
+                onClick={() => setActiveMobileTab('home')}
+                style={{
+                  alignSelf: 'flex-start',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  padding: '6px 12px',
+                  borderRadius: 'var(--ag-radius-sm)',
+                  backgroundColor: 'var(--ag-color-surface-base)',
+                  border: '1px solid var(--ag-border-default)',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  color: 'var(--ag-color-primary-base)',
+                  cursor: 'pointer',
+                }}
+              >
+                <ArrowLeft size={14} />
+                <span>Back to Decision Center</span>
+              </button>
+            )}
 
             {activeMobileTab === 'farm' && (
               <MyFarmView
@@ -552,27 +665,46 @@ export const HomeScreen: React.FC = () => {
             )}
 
             {activeMobileTab === 'mandi' && (
-              <MandiPriceCard
+              <MandiFullExperience
                 markets={markets}
                 loading={marketsLoading}
                 error={marketsError}
                 currentLang={currentLang}
+                location={location}
+                farmerCrops={crops}
+                farms={farms}
+                farmerProfile={farmerProfile}
+                onRefresh={() => loadLiveData(location)}
               />
             )}
 
             {activeMobileTab === 'money' && (
-              <div>
-                <h3 style={{ fontSize: '18px', fontWeight: 800, marginBottom: '14px', color: 'var(--ag-color-text-primary)' }}>
-                  Government Schemes & Agricultural Credit
-                </h3>
-                <QuickActions currentLang={currentLang} />
-              </div>
+              <MoneySchemesFullExperience
+                currentLang={currentLang}
+                farmerProfile={farmerProfile}
+                farms={farms}
+                onNavigateTab={(tab) => {
+                  setActiveMobileTab(tab as any);
+                }}
+              />
             )}
 
             {activeMobileTab === 'alerts' && (
               <AlertsSection
-                alerts={SAMPLE_ALERTS}
+                alerts={alerts}
                 currentLang={currentLang}
+                crops={crops}
+                farms={farms}
+                markets={markets}
+                farmerProfile={farmerProfile}
+                onNavigateTab={(tab) => {
+                  if (tab === 'doctor') setActiveMobileTab('doctor');
+                  else if (tab === 'farm') setActiveMobileTab('farm');
+                  else if (tab === 'mandi') setActiveMobileTab('mandi');
+                  else if (tab === 'alerts') setActiveMobileTab('alerts');
+                  else setActiveMobileTab('home');
+                }}
+                onRefreshAlerts={refreshFarmerContext}
               />
             )}
           </div>
@@ -600,7 +732,12 @@ export const HomeScreen: React.FC = () => {
         isOpen={showLoginModal}
         onClose={() => setShowLoginModal(false)}
         currentLang={currentLang}
-        onSuccess={(profile) => setFarmerProfile(profile)}
+        activeProfile={farmerProfile}
+        onSwitchFarmer={handleSwitchFarmer}
+        onSuccess={(profile) => {
+          setFarmerProfile(profile);
+          refreshFarmerContext();
+        }}
       />
     </div>
   );

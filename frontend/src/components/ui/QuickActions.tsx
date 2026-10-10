@@ -6,9 +6,10 @@ import { Calculator, Landmark, FileText, ChevronRight } from 'lucide-react';
 interface QuickActionsProps {
   currentLang: Language;
   style?: React.CSSProperties;
+  onSelectAction?: (actionId: string) => void;
 }
 
-export const QuickActions: React.FC<QuickActionsProps> = ({ currentLang, style }) => {
+export const QuickActions: React.FC<QuickActionsProps> = ({ currentLang, style, onSelectAction }) => {
   const t = translations[currentLang];
 
   const actions = [
@@ -48,6 +49,7 @@ export const QuickActions: React.FC<QuickActionsProps> = ({ currentLang, style }
         {actions.map((act) => (
           <div
             key={act.id}
+            onClick={() => onSelectAction?.(act.id)}
             style={{
               backgroundColor: 'var(--ag-color-surface-base)',
               borderRadius: 'var(--ag-radius-md)',

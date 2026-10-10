@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import type { CropHealth, CropDoctorDiagnosis, Language } from '../../types';
+import type { CropHealth, CropDoctorDiagnosis, CropInvestigatorQuestion, CropInvestigationTurn, Language } from '../../types';
 import { translations } from '../../i18n/translations';
 import { CropHealthService, type CropDiagnosisHistoryItem } from '../../services/crop/cropHealthService';
+import { SpeechService } from '../../services/voice/speechService';
+import { localizeCropName, localizeDiagnosisTitle, formatRelativeDateLocalized } from '../../i18n/agriLocalization';
 import { 
   Camera, 
   CheckCircle, 
@@ -11,7 +13,6 @@ import {
   Mic, 
   Square, 
   Plus, 
-  HelpCircle, 
   Sparkles, 
   Volume2, 
   VolumeX, 
@@ -19,12 +20,13 @@ import {
   RotateCcw, 
   Maximize2,
   History,
-  ChevronRight,
   RefreshCw,
   Clock,
   ShieldCheck,
-  ChevronDown,
-  ChevronUp
+  Send,
+  Check,
+  ArrowUpRight,
+  HelpCircle
 } from 'lucide-react';
 
 interface CropHealthCardProps {
@@ -32,6 +34,8 @@ interface CropHealthCardProps {
   currentLang: Language;
   onCropUpdate?: (updated: CropHealth) => void;
   style?: React.CSSProperties;
+  isHomeWidget?: boolean;
+  onNavigateToDoctor?: () => void;
 }
 
 interface MismatchErrorData {
@@ -41,21 +45,22 @@ interface MismatchErrorData {
   voiceCrop?: string | null;
 }
 
+type ConsultationStep = 'idle' | 'investigating' | 'consulting' | 'analyzing_answer' | 'final_analyzing' | 'result' | 'mismatch';
+
 export const CropHealthCard: React.FC<CropHealthCardProps> = ({
   crops,
   currentLang,
   style,
+  isHomeWidget = false,
+  onNavigateToDoctor,
 }) => {
   const t = translations[currentLang];
-  const [showDoctorModal, setShowDoctorModal] = useState(false);
-  const [activeTab, setActiveTab] = useState<'assess' | 'history'>('assess');
   
   // History list from Supabase
   const [historyList, setHistoryList] = useState<CropDiagnosisHistoryItem[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
   const [isHistoricalView, setIsHistoricalView] = useState<boolean>(false);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'failed' | null>('saved');
-  const [showFullTranscript, setShowFullTranscript] = useState<boolean>(false);
   
   // Multimodal Inputs
   const [selectedImages, setSelectedImages] = useState<Array<{ file: File; previewUrl: string }>>([]);
@@ -63,21 +68,35 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
   const [activeImageIdx, setActiveImageIdx] = useState<number>(0);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; index: number } | null>(null);
 
-  // Voice Recording & Live Speech Recognition
+  // Voice Recording & Live Speech Recognition (Entry Form)
   const [isRecording, setIsRecording] = useState(false);
   const [liveInterimTranscript, setLiveInterimTranscript] = useState<string>('');
   const [liveFinalTranscript, setLiveFinalTranscript] = useState<string>('');
   const [recordedAudioBlob, setRecordedAudioBlob] = useState<Blob | null>(null);
   const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
   const [voiceTranscriptText, setVoiceTranscriptText] = useState<string>('');
-  const [selectedCropName, setSelectedCropName] = useState<string>('Cotton');
+  const [selectedCropName, setSelectedCropName] = useState<string>(crops[0]?.cropName || 'Paddy');
 
   // Text to Speech (Read Aloud)
   const [speakingSection, setSpeakingSection] = useState<string | null>(null);
 
+  // 2-Stage Guided Consultation State
+  const [consultationStep, setConsultationStep] = useState<ConsultationStep>('idle');
+  const [questionsQueue, setQuestionsQueue] = useState<CropInvestigatorQuestion[]>([]);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
+  const [currentQuestion, setCurrentQuestion] = useState<(CropInvestigatorQuestion & { questionIndex: number; totalQuestions?: number }) | null>(null);
+  const [consultationQnA, setConsultationQnA] = useState<CropInvestigationTurn[]>([]);
+  
+  // Question Voice Recording & Transcription State
+  const [isRecordingQuestion, setIsRecordingQuestion] = useState<boolean>(false);
+  const [isTranscribingQuestion, setIsTranscribingQuestion] = useState<boolean>(false);
+  const [questionTranscript, setQuestionTranscript] = useState<string>('');
+  const [isTypingQuestion, setIsTypingQuestion] = useState<boolean>(false);
+  const [typedQuestionAnswer, setTypedQuestionAnswer] = useState<string>('');
+  const [isSubmittingAnswer, setIsSubmittingAnswer] = useState<boolean>(false);
+
   // Loading & Diagnostics
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [loadingStage, setLoadingStage] = useState(0);
   const [diagnosisResult, setDiagnosisResult] = useState<CropDoctorDiagnosis | null>(null);
   const [mismatchError, setMismatchError] = useState<MismatchErrorData | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -87,6 +106,10 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
   const audioChunksRef = useRef<Blob[]>([]);
   const speechRecognitionRef = useRef<any>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+
+  const questionMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const questionAudioChunksRef = useRef<Blob[]>([]);
+  const questionSpeechRecRef = useRef<any>(null);
 
   // Track all active object URLs in a ref so they are never prematurely revoked on re-renders
   const activeObjectUrlsRef = useRef<Set<string>>(new Set());
@@ -108,26 +131,6 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     }
   }, []);
 
-  // Progressive loading message sequence
-  const loadingMessages = [
-    'Uploading photos...',
-    'Understanding what you said...',
-    'Checking the crop images...',
-    'Comparing the submitted photos...',
-    'Preparing your crop assessment...',
-  ];
-
-  useEffect(() => {
-    let timer: any;
-    if (isAnalyzing) {
-      setLoadingStage(0);
-      timer = setInterval(() => {
-        setLoadingStage((prev) => (prev < loadingMessages.length - 1 ? prev + 1 : prev));
-      }, 1600);
-    }
-    return () => clearInterval(timer);
-  }, [isAnalyzing]);
-
   // Clean up object URLs and speech ONLY when component unmounts
   useEffect(() => {
     return () => {
@@ -145,13 +148,39 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     };
   }, []);
 
-  // Cancel speech synthesis when modal closes
+  // Sync selectedCropName when crops list updates
+  useEffect(() => {
+    if (crops.length > 0 && !crops.some(c => c.cropName.toLowerCase() === selectedCropName.toLowerCase())) {
+      setSelectedCropName(crops[0].cropName);
+    }
+  }, [crops, selectedCropName]);
+
   const stopAllSpeech = useCallback(() => {
     if (typeof window !== 'undefined' && window.speechSynthesis) {
       window.speechSynthesis.cancel();
       setSpeakingSection(null);
     }
   }, []);
+
+  // Load history from Supabase
+  const loadHistory = useCallback(async () => {
+    setIsLoadingHistory(true);
+    try {
+      const items = await CropHealthService.getDiagnosisHistory();
+      setHistoryList(items || []);
+    } catch (err) {
+      console.warn('[CropDoctor] History fetch error:', err);
+      setHistoryList([]);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isHomeWidget) {
+      loadHistory();
+    }
+  }, [isHomeWidget, loadHistory]);
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -187,7 +216,6 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     stopAllSpeech();
 
     try {
-      // 1. Start standard MediaRecorder stream for authoritative backend Whisper transcription
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioChunksRef.current = [];
       const recorder = new MediaRecorder(stream);
@@ -210,14 +238,11 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
 
-      // 2. Start Browser Live Speech Recognition for immediate UI feedback
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       if (SpeechRecognition) {
         const recognition = new SpeechRecognition();
         recognition.continuous = true;
         recognition.interimResults = true;
-        
-        // Map language to locale
         recognition.lang = currentLang === 'te' ? 'te-IN' : (currentLang === 'hi' ? 'hi-IN' : 'en-IN');
 
         recognition.onresult = (event: any) => {
@@ -285,7 +310,7 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     }
   };
 
-  // Text to Speech (SpeechSynthesis) handler
+  // Text to Speech handler
   const handleSpeakText = (sectionKey: string, textToSpeak: string) => {
     if (typeof window === 'undefined' || !window.speechSynthesis) return;
 
@@ -298,9 +323,8 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
 
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     utterance.lang = currentLang === 'te' ? 'te-IN' : (currentLang === 'hi' ? 'hi-IN' : 'en-IN');
-    utterance.rate = 0.95; // slightly slower for clarity
+    utterance.rate = 0.95;
 
-    // Try finding matching native voice
     const voices = window.speechSynthesis.getVoices();
     const targetLangPrefix = currentLang === 'te' ? 'te' : (currentLang === 'hi' ? 'hi' : 'en');
     const matchedVoice = voices.find(v => v.lang.startsWith(targetLangPrefix));
@@ -315,27 +339,6 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     window.speechSynthesis.speak(utterance);
   };
 
-
-  // Load history when opening modal or changing tab
-  const loadHistory = useCallback(async () => {
-    setIsLoadingHistory(true);
-    try {
-      const items = await CropHealthService.getDiagnosisHistory();
-      setHistoryList(items || []);
-    } catch (err) {
-      console.warn('[CropDoctor] History fetch error:', err);
-      setHistoryList([]);
-    } finally {
-      setIsLoadingHistory(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (showDoctorModal && activeTab === 'history') {
-      loadHistory();
-    }
-  }, [showDoctorModal, activeTab, loadHistory]);
-
   const handleOpenHistoricalItem = async (item: CropDiagnosisHistoryItem) => {
     stopAllSpeech();
     setIsAnalyzing(true);
@@ -346,15 +349,24 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
         setIsHistoricalView(true);
         setSaveStatus('saved');
         setMismatchError(null);
-        if (full.images && full.images.length > 0) {
-          setAnalyzedImagesList(full.images.map((img: any, idx: number) => ({
-            previewUrl: img.signedUrl || '',
-            name: `Photo #${idx + 1}`
+        const imagesToLoad = (full.images && full.images.length > 0)
+          ? full.images
+          : (item.signedImages && item.signedImages.length > 0)
+            ? item.signedImages
+            : (item.thumbnailSignedUrl ? [{ previewUrl: item.thumbnailSignedUrl, name: 'Photo #1' }] : []);
+
+        if (imagesToLoad.length > 0) {
+          setAnalyzedImagesList(imagesToLoad.map((img: any, idx: number) => ({
+            previewUrl: img.previewUrl || img.signedUrl || img.url || '',
+            name: img.name || `Photo #${idx + 1}`
           })));
           setActiveImageIdx(0);
         } else {
           setAnalyzedImagesList([]);
         }
+
+        // Scroll up smoothly to view the diagnosis result
+        window.scrollTo({ top: 0, behavior: 'smooth' });
       } else {
         alert(t.dataUnavailable || 'Data unavailable');
       }
@@ -366,6 +378,96 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     }
   };
 
+  // Question Voice Recording Handlers
+  const startQuestionVoiceRecording = async () => {
+    if (isRecordingQuestion) return;
+    setQuestionTranscript('');
+    stopAllSpeech();
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      questionAudioChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          questionAudioChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const audioBlob = new Blob(questionAudioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        stream.getTracks().forEach(track => track.stop());
+
+        setIsTranscribingQuestion(true);
+        try {
+          const res = await SpeechService.transcribeAudioBlob(audioBlob, currentLang);
+          if (res.text && res.text.trim().length > 0) {
+            setQuestionTranscript(res.text.trim());
+          }
+        } catch (tErr) {
+          console.warn('[CropDoctor] Question Whisper error:', tErr);
+        } finally {
+          setIsTranscribingQuestion(false);
+        }
+      };
+
+      recorder.start();
+      questionMediaRecorderRef.current = recorder;
+      setIsRecordingQuestion(true);
+
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = currentLang === 'te' ? 'te-IN' : (currentLang === 'hi' ? 'hi-IN' : 'en-IN');
+
+        recognition.onresult = (event: any) => {
+          let text = '';
+          for (let i = 0; i < event.results.length; ++i) {
+            text += event.results[i][0].transcript + ' ';
+          }
+          if (text.trim().length > 0) {
+            setQuestionTranscript(text.trim());
+          }
+        };
+
+        try {
+          recognition.start();
+          speechRecognitionRef.current = recognition;
+        } catch (rErr) {
+          console.warn('[CropDoctor] Web speech start fallback:', rErr);
+        }
+      }
+    } catch (err) {
+      console.warn('[CropDoctor] Question mic access error:', err);
+      setIsTypingQuestion(true);
+    }
+  };
+
+  const stopQuestionVoiceRecording = () => {
+    if (!isRecordingQuestion) return;
+    setIsRecordingQuestion(false);
+
+    if (questionSpeechRecRef.current) {
+      try {
+        questionSpeechRecRef.current.stop();
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (questionMediaRecorderRef.current && questionMediaRecorderRef.current.state !== 'inactive') {
+      try {
+        questionMediaRecorderRef.current.stop();
+      } catch (e) {
+        console.warn('[CropDoctor] Stop question recorder error:', e);
+      }
+    }
+  };
+
+  // Run Stage 1 AI Investigation
   const handleRunAnalysis = async () => {
     if (selectedImages.length === 0) {
       setErrorMessage(currentLang === 'te' ? 'దయచేసి కనీసం ఒక పంట ఫోటో తీయండి లేదా అప్‌లోడ్ చేయండి.' : (currentLang === 'hi' ? 'कृपया कम से कम एक फसल की तस्वीर लें या अपलोड करें।' : 'Please take or upload at least one photo of the affected plant or leaf.'));
@@ -374,14 +476,128 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
 
     stopAllSpeech();
     setIsAnalyzing(true);
+    setConsultationStep('investigating');
     setErrorMessage(null);
     setMismatchError(null);
     setDiagnosisResult(null);
     setIsHistoricalView(false);
+    setConsultationQnA([]);
+    setCurrentQuestion(null);
+    setQuestionTranscript('');
+    setIsTypingQuestion(false);
+    setTypedQuestionAnswer('');
 
-    // Save image previews for rendering in result
     setAnalyzedImagesList(selectedImages.map(img => ({ previewUrl: img.previewUrl, name: img.file.name })));
     setActiveImageIdx(0);
+
+    const result = await CropHealthService.investigateCrop({
+      images: selectedImages.map(item => item.file),
+      audioBlob: recordedAudioBlob,
+      voiceText: voiceTranscriptText,
+      cropName: selectedCropName,
+      language: currentLang,
+      conversationHistory: [],
+    });
+
+    const isMismatchDetected = 
+      result.status === 'mismatch' ||
+      result.state === 'mismatch' ||
+      Boolean(result.cropMismatchDetected) ||
+      Boolean(result.mismatchNotice);
+
+    if (isMismatchDetected) {
+      setIsAnalyzing(false);
+      setConsultationStep('mismatch');
+      setDiagnosisResult(null);
+      setSaveStatus(null);
+      setMismatchError({
+        notice: result.mismatchNotice || result.explanation || result.message || (
+          currentLang === 'te'
+            ? `పంట వివరాలలో తేడా గుర్తించబడింది: మీరు ఎంచుకున్న పంట '${result.selectedCrop || selectedCropName}', కానీ ఫోటోలలో ఇతర వివరాలు ఉన్నాయి. దయచేసి సరిచూసి మళ్లీ విశ్లేషించండి.`
+            : 'Crop mismatch detected between selected crop, photos, and voice description. Please recheck and analyze again.'
+        ),
+        selectedCrop: result.selectedCrop || selectedCropName,
+        visualCrop: result.visualCropIdentified || (currentLang === 'te' ? 'వేరే చిత్రం' : 'Unrelated photo'),
+        voiceCrop: result.voiceCropMentioned || null,
+      });
+      return;
+    }
+
+    if (result.state === 'insufficient_image') {
+      setIsAnalyzing(false);
+      setConsultationStep('idle');
+      setErrorMessage(result.explanation || (currentLang === 'te' ? 'ఫోటో నాణ్యత తగినంతగా లేదు. దయచేసి స్పష్టమైన పంట ఫోటో తీయండి.' : 'Photo is unclear or not a plant photo. Please take a clearer crop photo.'));
+      return;
+    }
+
+    const qList = (result.questions && result.questions.length > 0)
+      ? result.questions
+      : (result.question && result.question.text ? [result.question] : []);
+
+    if (result.state === 'needs_farmer_input' && qList.length > 0) {
+      setIsAnalyzing(false);
+      setConsultationStep('consulting');
+      setQuestionsQueue(qList);
+      setCurrentQuestionIndex(0);
+      setCurrentQuestion({
+        ...qList[0],
+        questionIndex: 1,
+        totalQuestions: qList.length,
+      });
+      return;
+    }
+
+    await runFinalDiagnosis([]);
+  };
+
+  const handleSubmitQuestionAnswer = async (
+    answerText: string,
+    answerType: 'voice' | 'text' | 'unknown' = 'voice'
+  ) => {
+    if (isSubmittingAnswer || !currentQuestion) return;
+    setIsSubmittingAnswer(true);
+    stopAllSpeech();
+
+    const cleanAnswer = answerText?.trim() || (answerType === 'unknown' ? (t.dontKnowBtn || "I don't know") : '');
+    if (!cleanAnswer) {
+      setIsSubmittingAnswer(false);
+      return;
+    }
+
+    const newTurn: CropInvestigationTurn = {
+      questionText: currentQuestion.text,
+      questionReason: currentQuestion.reason,
+      answerText: cleanAnswer,
+      answerType,
+      language: currentLang,
+    };
+
+    const updatedQnA = [...consultationQnA, newTurn];
+    setConsultationQnA(updatedQnA);
+    
+    setQuestionTranscript('');
+    setIsTypingQuestion(false);
+    setTypedQuestionAnswer('');
+    setIsSubmittingAnswer(false);
+
+    const nextIdx = currentQuestionIndex + 1;
+    if (nextIdx < questionsQueue.length && updatedQnA.length < 3) {
+      setCurrentQuestionIndex(nextIdx);
+      setCurrentQuestion({
+        ...questionsQueue[nextIdx],
+        questionIndex: nextIdx + 1,
+        totalQuestions: questionsQueue.length,
+      });
+      return;
+    }
+
+    await runFinalDiagnosis(updatedQnA);
+  };
+
+  const runFinalDiagnosis = async (finalQnA: CropInvestigationTurn[]) => {
+    setIsAnalyzing(true);
+    setConsultationStep('final_analyzing');
+    setCurrentQuestion(null);
 
     const result = await CropHealthService.diagnoseCropMultimodal({
       images: selectedImages.map(item => item.file),
@@ -389,52 +605,46 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
       voiceText: voiceTranscriptText,
       cropName: selectedCropName,
       language: currentLang,
+      consultationQnA: finalQnA,
     });
 
     setIsAnalyzing(false);
 
-    const isMismatchDetected = 
-      result.status === 'mismatch' ||
-      Boolean(result.cropMismatchDetected) ||
-      Boolean(result.diagnosis?.cropMismatchDetected) ||
-      Boolean(result.mismatchNotice) ||
-      Boolean(result.diagnosis?.mismatchNotice) ||
-      /సంబంధించినది కాదు|పోస్టర్|మీరు పంటగా|పంట అసమానత|వేరే పంట|not related|poster|mismatch|different crop/i.test(
-        (result.diagnosis?.summary || '') + ' ' + (result.diagnosis?.diagnosisTitle || '') + ' ' + (result.message || '')
-      );
-
-    if (isMismatchDetected) {
-      // STOP! DO NOT GO TO RESULT PAGE! Stay on upload/details input page!
+    if (result.status === 'mismatch' || Boolean(result.cropMismatchDetected)) {
+      setConsultationStep('mismatch');
       setDiagnosisResult(null);
       setSaveStatus(null);
       setMismatchError({
-        notice: result.mismatchNotice || result.diagnosis?.mismatchNotice || result.diagnosis?.summary || result.message || (
+        notice: result.mismatchNotice || result.diagnosis?.mismatchNotice || (
           currentLang === 'te'
-            ? `పంట వివరాలలో తేడా గుర్తించబడింది: మీరు ఎంచుకున్న పంట '${result.diagnosis?.selectedCrop || selectedCropName}', కానీ ఫోటోలలో లేదా వాయిస్‌లో ఇతర పంట వివరాలు ఉన్నాయి. దయచేసి వివరాలను సరిచూసి మళ్లీ విశ్లేషించండి.`
-            : (currentLang === 'hi'
-                ? `फसल विवरण में बेमेल पाया गया: आपने '${result.diagnosis?.selectedCrop || selectedCropName}' चुनी है, लेकिन तस्वीरों या आवाज में अन्य फसल का विवरण है। कृपया पुनः जांचें।`
-                : 'Crop mismatch detected between selected crop, photos, and voice description. Please recheck your inputs and analyze again.')
+            ? `పంట వివరాలలో తేడా గుర్తించబడింది. దయచేసి వివరాలను సరిచూసి మళ్లీ విశ్లేషించండి.`
+            : 'Crop mismatch detected between selected crop, photos, and voice description.'
         ),
-        selectedCrop: result.selectedCrop || result.diagnosis?.selectedCrop || selectedCropName,
-        visualCrop: result.visualCropIdentified || result.diagnosis?.visualCropIdentified || (currentLang === 'te' ? 'పోస్టర్ / వేరే చిత్రం' : 'Poster / Unrelated photo'),
-        voiceCrop: result.voiceCropMentioned || result.diagnosis?.voiceCropMentioned || null,
+        selectedCrop: result.selectedCrop || selectedCropName,
+        visualCrop: result.visualCropIdentified || (currentLang === 'te' ? 'వేరే చిత్రం' : 'Unrelated photo'),
+        voiceCrop: result.voiceCropMentioned || null,
       });
       return;
     }
 
     if (result.status === 'success' && result.diagnosis) {
       setMismatchError(null);
-      setDiagnosisResult(result.diagnosis);
+      setDiagnosisResult({
+        ...result.diagnosis,
+        consultationQnA: result.diagnosis.consultationQnA || finalQnA,
+      });
+      setConsultationStep('result');
       setSaveStatus('saved');
-      // Refresh background history
       loadHistory();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
       setSaveStatus('failed');
+      setConsultationStep('idle');
       setErrorMessage(result.message || (currentLang === 'te' ? 'పంట విశ్లేషణ తాత్కాలికంగా అందుబాటులో లేదు. దయచేసి మళ్లీ ప్రయత్నించండి.' : 'Crop Doctor analysis is temporarily unavailable. Please try again.'));
     }
   };
 
-  const handleResetModal = () => {
+  const handleResetToNewUpload = () => {
     stopAllSpeech();
     selectedImages.forEach(img => revokeTrackedObjectURL(img.previewUrl));
     setSelectedImages([]);
@@ -445,8 +655,13 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     setErrorMessage(null);
     setLightboxImage(null);
     setIsHistoricalView(false);
-    setShowFullTranscript(false);
-    setShowDoctorModal(false);
+    setConsultationStep('idle');
+    setCurrentQuestion(null);
+    setConsultationQnA([]);
+    setQuestionTranscript('');
+    setIsTypingQuestion(false);
+    setTypedQuestionAnswer('');
+    setIsSubmittingAnswer(false);
   };
 
   const handleSpeakFullAssessment = () => {
@@ -465,7 +680,52 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     handleSpeakText('global', sections);
   };
 
-  // Compute Evidence Strength from backend assessment
+  const renderListenButton = (sectionKey: string, textToSpeak: string, variant: 'primary' | 'subtle' = 'subtle', customLabel?: string) => {
+    if (!textToSpeak || !textToSpeak.trim()) return null;
+    const isSpeaking = speakingSection === sectionKey;
+    const isPrimary = variant === 'primary';
+    
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          handleSpeakText(sectionKey, textToSpeak);
+        }}
+        aria-label={isSpeaking ? (currentLang === 'te' ? 'ఆపండి' : 'Stop') : (currentLang === 'te' ? 'వినండి' : 'Listen')}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '5px',
+          backgroundColor: isSpeaking 
+            ? 'var(--ag-color-primary-base)' 
+            : (isPrimary ? '#FFFFFF' : 'var(--ag-color-primary-light)'),
+          color: isSpeaking 
+            ? '#FFFFFF' 
+            : 'var(--ag-color-primary-dark)',
+          border: isSpeaking 
+            ? '1px solid var(--ag-color-primary-base)' 
+            : '1px solid #86EFAC',
+          borderRadius: 'var(--ag-radius-full)',
+          padding: '4px 10px',
+          fontSize: '12px',
+          fontWeight: 700,
+          cursor: 'pointer',
+          transition: 'all 0.15s ease',
+          boxShadow: isSpeaking ? '0 2px 6px rgba(47, 125, 50, 0.2)' : 'none',
+          flexShrink: 0,
+        }}
+      >
+        {isSpeaking ? <VolumeX size={14} /> : <Volume2 size={14} />}
+        <span>
+          {isSpeaking 
+            ? (currentLang === 'te' ? 'ఆపండి' : (currentLang === 'hi' ? 'रोकें' : 'Stop')) 
+            : (customLabel || (currentLang === 'te' ? 'వినండి' : (currentLang === 'hi' ? 'सुनें' : 'Listen')))}
+        </span>
+      </button>
+    );
+  };
+
   const getEvidenceStrengthBadge = () => {
     if (!diagnosisResult) return null;
     const confidence = (diagnosisResult as any).evidenceAssessment?.photoCropAssessment?.identityConfidence ||
@@ -487,30 +747,12 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     if (n.includes('cotton') || n.includes('పత్తి') || n.includes('कपास')) return '🌾';
     if (n.includes('maize') || n.includes('మొక్కజొన్న') || n.includes('मक्का')) return '🌽';
     if (n.includes('paddy') || n.includes('వరి') || n.includes('धान') || n.includes('rice')) return '🌾';
+    if (n.includes('groundnut') || n.includes('వేరుశనగ') || n.includes('मूंगफली')) return '🥜';
+    if (n.includes('red gram') || n.includes('కందులు') || n.includes('अरहर') || n.includes('tur')) return '🌱';
     if (n.includes('tomato') || n.includes('టమాట') || n.includes('टमाटर')) return '🍅';
     return '🌱';
   };
 
-  const formatDiagnosisDate = (dateStr?: string) => {
-    if (!dateStr) return '';
-    try {
-      const d = new Date(dateStr);
-      const now = new Date();
-      const isToday = d.toDateString() === now.toDateString();
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const isYesterday = d.toDateString() === yesterday.toDateString();
-
-      const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      if (isToday) return `Today, ${timeStr}`;
-      if (isYesterday) return `Yesterday, ${timeStr}`;
-      return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${timeStr}`;
-    } catch {
-      return dateStr;
-    }
-  };
-
-  // Localized live speech banner label
   const getLiveVoiceLabel = () => {
     switch (currentLang) {
       case 'te': return 'మీరు చెప్పింది';
@@ -549,1524 +791,1664 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
     }
   };
 
-  // Visual Annotations for currently active image
+  // Annotations for active image in result
   const currentImageAnnotations = diagnosisResult?.visualAnnotations?.filter(
     (ann) => ann.imageIndex === activeImageIdx
   ) || [];
 
-  return (
-    <section 
-      aria-labelledby="crop-health-heading" 
-      style={{
-        margin: '0',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        ...style,
-      }}
-    >
-      <div style={{
-        backgroundColor: 'var(--ag-color-surface-base)',
-        borderRadius: 'var(--ag-radius-card)',
-        border: '1px solid var(--ag-border-default)',
-        padding: '20px',
-        boxShadow: 'var(--ag-shadow-card)',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'space-between',
-      }}>
-        <div>
-          {/* Header & Diagnose CTA */}
-          <div style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: '14px',
-          }}>
-            <h3 
-              id="crop-health-heading"
-              style={{
-                fontSize: '12px',
-                fontWeight: 700,
-                color: 'var(--ag-color-text-secondary)',
-                letterSpacing: '0.04em',
-                textTransform: 'uppercase',
-              }}
-            >
-              {t.cropHealthTitle}
-            </h3>
+  // Farmer's active crops list + standard fallback crops
+  const availableCropsList = [
+    ...crops.map(c => c.cropName),
+    'Paddy',
+    'Cotton',
+    'Red Gram',
+    'Groundnut',
+    'Maize',
+    'Chilli'
+  ].filter((val, idx, arr) => arr.indexOf(val) === idx);
 
-            <button
-              onClick={() => setShowDoctorModal(true)}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                backgroundColor: 'var(--ag-color-primary-light)',
-                color: 'var(--ag-color-primary-dark)',
-                border: '1px solid #A3D9A5',
-                padding: '8px 16px',
-                borderRadius: 'var(--ag-radius-full)',
-                fontSize: '13px',
-                fontWeight: 700,
-                cursor: 'pointer',
-                minHeight: '40px',
-              }}
-            >
-              <Camera size={16} color="var(--ag-color-primary-base)" />
-              <span>{t.diagnoseCta}</span>
-            </button>
-          </div>
+  // =========================================================================
+  // HOME SCREEN COMPACT WIDGET MODE
+  // =========================================================================
+  if (isHomeWidget) {
+    return (
+      <section 
+        aria-labelledby="crop-health-heading" 
+        style={{
+          margin: '0',
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          ...style,
+        }}
+      >
+        <div style={{
+          backgroundColor: 'var(--ag-color-surface-base)',
+          borderRadius: 'var(--ag-radius-card)',
+          border: '1px solid var(--ag-border-default)',
+          padding: '20px',
+          boxShadow: 'var(--ag-shadow-card)',
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+        }}>
+          <div>
+            {/* Header & Diagnose CTA */}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '14px',
+            }}>
+              <h3 
+                id="crop-health-heading"
+                style={{
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  color: 'var(--ag-color-text-secondary)',
+                  letterSpacing: '0.04em',
+                  textTransform: 'uppercase',
+                }}
+              >
+                {t.cropHealthTitle}
+              </h3>
 
-          {/* Crops List */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {crops.map((crop) => {
-              const badge = getStatusBadge(crop.status);
-              return (
-                <div 
-                  key={crop.id}
-                  style={{
-                    backgroundColor: 'var(--ag-color-bg-base)',
-                    borderRadius: 'var(--ag-radius-md)',
-                    padding: '12px 14px',
-                    border: '1px solid var(--ag-border-default)',
-                  }}
-                >
-                  {/* Crop Header */}
-                  <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: '6px',
-                  }}>
-                    <div>
-                      <span style={{ fontSize: '15px', fontWeight: 700, color: 'var(--ag-color-text-primary)' }}>
-                        {crop.cropName}
-                      </span>
-                      <span style={{ fontSize: '12px', color: 'var(--ag-color-text-secondary)', marginLeft: '6px' }}>
-                        ({crop.acres} Acres · {crop.variety})
+              <button
+                onClick={onNavigateToDoctor}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  backgroundColor: 'var(--ag-color-primary-light)',
+                  color: 'var(--ag-color-primary-dark)',
+                  border: '1px solid #A3D9A5',
+                  padding: '8px 16px',
+                  borderRadius: 'var(--ag-radius-full)',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  minHeight: '40px',
+                }}
+              >
+                <Camera size={16} color="var(--ag-color-primary-base)" />
+                <span>{t.diagnoseCta}</span>
+              </button>
+            </div>
+
+            {/* Crops List */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {crops.map((crop) => {
+                const badge = getStatusBadge(crop.status);
+                return (
+                  <div 
+                    key={crop.id}
+                    style={{
+                      backgroundColor: 'var(--ag-color-bg-base)',
+                      borderRadius: 'var(--ag-radius-md)',
+                      padding: '12px 14px',
+                      border: '1px solid var(--ag-border-default)',
+                    }}
+                  >
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: '6px',
+                    }}>
+                      <div>
+                        <span style={{ fontSize: '15px', fontWeight: 700, color: 'var(--ag-color-text-primary)' }}>
+                          {localizeCropName(crop.cropName, currentLang)}
+                        </span>
+                        <span style={{ fontSize: '12px', color: 'var(--ag-color-text-secondary)', marginLeft: '6px' }}>
+                          ({crop.acres} Acres · {crop.variety})
+                        </span>
+                      </div>
+
+                      <span style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        backgroundColor: badge.bg,
+                        border: badge.border,
+                        color: badge.color,
+                        padding: '3px 8px',
+                        borderRadius: 'var(--ag-radius-full)',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                      }}>
+                        {badge.icon}
+                        {badge.label}
                       </span>
                     </div>
 
-                    <span style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '4px',
-                      backgroundColor: badge.bg,
-                      border: badge.border,
-                      color: badge.color,
-                      padding: '3px 8px',
-                      borderRadius: 'var(--ag-radius-full)',
-                      fontSize: '11px',
-                      fontWeight: 700,
+                    {crop.diseaseIdentified && (
+                      <p style={{
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        color: 'var(--ag-color-danger-base)',
+                        marginBottom: '4px',
+                      }}>
+                        ⚠ {crop.diseaseIdentified}
+                      </p>
+                    )}
+
+                    <p style={{
+                      fontSize: '13px',
+                      color: 'var(--ag-color-text-primary)',
+                      lineHeight: 1.4,
+                      marginBottom: '6px',
                     }}>
-                      {badge.icon}
-                      {badge.label}
-                    </span>
+                      {crop.recommendedAction}
+                    </p>
+
+                    <div style={{
+                      fontSize: '11px',
+                      color: 'var(--ag-color-text-secondary)',
+                    }}>
+                      {t.lastChecked}: {crop.lastInspectionDate}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // =========================================================================
+  // DEDICATED FULL-PAGE CROP DOCTOR EXPERIENCE (Upload Top + Past History Below)
+  // =========================================================================
+  return (
+    <section 
+      aria-labelledby="crop-doctor-heading"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '24px',
+        width: '100%',
+        ...style,
+      }}
+    >
+      {/* 1. Page Title & Guidance Header */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        flexWrap: 'wrap',
+        gap: '12px',
+        paddingBottom: '4px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{
+            width: '46px',
+            height: '46px',
+            borderRadius: '14px',
+            backgroundColor: 'var(--ag-color-primary-light)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            border: '1px solid #86EFAC',
+            flexShrink: 0,
+          }}>
+            <Camera size={24} color="var(--ag-color-primary-base)" />
+          </div>
+          <div>
+            <h2 
+              id="crop-doctor-heading"
+              style={{
+                fontSize: '22px',
+                fontWeight: 800,
+                color: 'var(--ag-color-text-primary)',
+                margin: 0,
+                letterSpacing: '-0.01em',
+              }}
+            >
+              {currentLang === 'te' ? 'అగ్రిగైడ్ క్రాప్ డాక్టర్' : (currentLang === 'hi' ? 'एग्रीगाइड क्रॉप डॉक्टर' : 'AgriGuide Crop Doctor')}
+            </h2>
+            <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', margin: '2px 0 0 0' }}>
+              {currentLang === 'te' 
+                ? 'పంట ఫోటోలు తీసి లేదా వాయిస్‌లో సమస్యను వివరించండి — తక్షణ విశ్లేషణ మరియు నివారణ సూచనలు పొందండి.' 
+                : (currentLang === 'hi' 
+                    ? 'फसल की तस्वीरें अपलोड करें या आवाज में बताएं — तुरंत बीमारी पहचान और उपचार सलाह पाएं।' 
+                    : 'Upload crop photos or describe symptoms by voice for instant pest/disease diagnosis and treatment advice.')}
+            </p>
+          </div>
+        </div>
+
+        {diagnosisResult && (
+          <button
+            onClick={handleResetToNewUpload}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '8px 16px',
+              borderRadius: 'var(--ag-radius-full)',
+              backgroundColor: 'var(--ag-color-surface-base)',
+              border: '1px solid var(--ag-border-default)',
+              fontSize: '13px',
+              fontWeight: 700,
+              color: 'var(--ag-color-primary-base)',
+              cursor: 'pointer',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+            }}
+          >
+            <Plus size={16} />
+            <span>{currentLang === 'te' ? 'కొత్త సమస్యను అప్‌లోడ్ చేయండి' : (currentLang === 'hi' ? 'नई समस्या अपलोड करें' : 'Upload New Problem')}</span>
+          </button>
+        )}
+      </div>
+
+      {/* ========================================================================= */}
+      {/* 2. TOP SECTION: DIRECT UPLOAD & DIAGNOSIS WORKSPACE                       */}
+      {/* ========================================================================= */}
+      <div 
+        id="crop-doctor-workspace"
+        style={{
+          backgroundColor: '#FFFFFF',
+          borderRadius: '20px',
+          border: '1.5px solid var(--ag-border-default)',
+          padding: '24px',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.05)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '20px',
+        }}
+      >
+        {/* VIEW A: DIAGNOSIS RESULT (EITHER FRESHLY GENERATED OR OPENED FROM HISTORY) */}
+        {diagnosisResult ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+            {/* Top Bar: Save status & Voice read-aloud */}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '10px',
+              paddingBottom: '12px',
+              borderBottom: '1px solid var(--ag-border-default)',
+            }}>
+              <div>
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  backgroundColor: saveStatus === 'failed' ? '#FEF2F2' : '#DCFCE7',
+                  color: saveStatus === 'failed' ? '#991B1B' : '#166534',
+                  border: `1px solid ${saveStatus === 'failed' ? '#FCA5A5' : '#86EFAC'}`,
+                  padding: '4px 12px',
+                  borderRadius: 'var(--ag-radius-full)',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                }}>
+                  <ShieldCheck size={14} />
+                  {isHistoricalView 
+                    ? (currentLang === 'te' ? 'గత విశ్లేషణ నివేదిక' : 'Historical Diagnosis Record') 
+                    : (saveStatus === 'failed' ? t.assessmentSaveFailed : t.assessmentSaved)}
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  onClick={handleSpeakFullAssessment}
+                  aria-label="Listen to full assessment"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    backgroundColor: speakingSection === 'global' ? 'var(--ag-color-primary-base)' : 'var(--ag-color-primary-light)',
+                    color: speakingSection === 'global' ? '#FFFFFF' : 'var(--ag-color-primary-dark)',
+                    border: '1.5px solid #86EFAC',
+                    padding: '8px 16px',
+                    borderRadius: 'var(--ag-radius-full)',
+                    fontSize: '13px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    minHeight: '40px',
+                    boxShadow: '0 2px 6px rgba(47, 125, 50, 0.12)',
+                  }}
+                >
+                  {speakingSection === 'global' ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                  <span>{speakingSection === 'global' ? t.stopListening : t.listenAssessment}</span>
+                </button>
+
+                <button
+                  onClick={handleResetToNewUpload}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    backgroundColor: 'var(--ag-color-surface-base)',
+                    color: 'var(--ag-color-text-primary)',
+                    border: '1px solid var(--ag-border-default)',
+                    padding: '8px 14px',
+                    borderRadius: 'var(--ag-radius-full)',
+                    fontSize: '13px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    minHeight: '40px',
+                  }}
+                >
+                  <RotateCcw size={14} />
+                  <span>{currentLang === 'te' ? 'వేరే సమస్యను పరిశీలించండి' : (currentLang === 'hi' ? 'दूसरी समस्या जांचें' : 'Check Another Problem')}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Status Hero Card */}
+            {(() => {
+              const strength = getEvidenceStrengthBadge();
+              const isProblem = diagnosisResult.status === 'problem_detected';
+              const isHealthy = diagnosisResult.status === 'no_issue';
+              const isUncertain = diagnosisResult.status === 'uncertain';
+              const summaryText = `${diagnosisResult.diagnosisTitle}. ${isHealthy ? t.noObviousProblem : (isUncertain ? t.uncertainEvidenceMsg : diagnosisResult.summary)}`;
+
+              return (
+                <div style={{
+                  backgroundColor: isProblem ? '#FEF2F2' : (isHealthy ? 'var(--ag-color-primary-light)' : '#FFFBEB'),
+                  border: `1.5px solid ${isProblem ? '#FCA5A5' : (isHealthy ? '#86EFAC' : '#FDE68A')}`,
+                  borderRadius: '16px',
+                  padding: '18px 20px',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', flexWrap: 'wrap', gap: '6px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      {isProblem && <AlertOctagon size={20} color="#991B1B" />}
+                      {isHealthy && <CheckCircle size={20} color="#166534" />}
+                      {isUncertain && <HelpCircle size={20} color="#92400E" />}
+                      <span style={{
+                        fontSize: '13px',
+                        fontWeight: 800,
+                        color: isProblem ? '#991B1B' : (isHealthy ? '#166534' : '#92400E'),
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.04em',
+                      }}>
+                        {isProblem ? t.possibleProblem : (isHealthy ? t.cropLooksHealthy : t.needClearerLook)}
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      {strength && (
+                        <span style={{
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          padding: '3px 10px',
+                          borderRadius: 'var(--ag-radius-full)',
+                          backgroundColor: strength.bg,
+                          color: strength.color,
+                          border: `1px solid ${strength.border}`,
+                        }}>
+                          {strength.label}
+                        </span>
+                      )}
+                      {renderListenButton('summary', summaryText, 'primary')}
+                    </div>
                   </div>
 
-                  {/* Disease / Condition Note */}
-                  {crop.diseaseIdentified && (
-                    <p style={{
-                      fontSize: '12px',
-                      fontWeight: 600,
-                      color: 'var(--ag-color-danger-base)',
-                      marginBottom: '4px',
-                    }}>
-                      ⚠ {crop.diseaseIdentified}
-                    </p>
+                  <h3 style={{
+                    fontSize: '20px',
+                    fontWeight: 800,
+                    color: isProblem ? '#7F1D1D' : (isHealthy ? 'var(--ag-color-primary-dark)' : '#78350F'),
+                    margin: '0 0 8px 0',
+                    lineHeight: 1.3,
+                  }}>
+                    {getCropEmoji(diagnosisResult.selectedCrop)} {diagnosisResult.diagnosisTitle}
+                  </h3>
+
+                  <p style={{
+                    fontSize: '14px',
+                    color: isProblem ? '#991B1B' : (isHealthy ? '#14532D' : '#92400E'),
+                    margin: 0,
+                    lineHeight: 1.5,
+                  }}>
+                    {isHealthy ? t.noObviousProblem : (isUncertain ? t.uncertainEvidenceMsg : diagnosisResult.summary)}
+                  </p>
+                </div>
+              );
+            })()}
+
+            {/* Findings & Photos Grid */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: analyzedImagesList.length > 0 ? 'repeat(auto-fit, minmax(320px, 1fr))' : '1fr',
+              gap: '16px',
+            }}>
+              {/* Photo Evidence View */}
+              {analyzedImagesList.length > 0 && (
+                <div style={{
+                  backgroundColor: 'var(--ag-color-bg-base)',
+                  borderRadius: '16px',
+                  border: '1px solid var(--ag-border-default)',
+                  padding: '16px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
+                        🌿 {t.whatISawInPhotos}
+                      </span>
+                      <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)', fontWeight: 600 }}>
+                        ({analyzedImagesList.length} {t.photosAnalyzed.toLowerCase()})
+                      </span>
+                    </div>
+
+                    {diagnosisResult.visualFindings && diagnosisResult.visualFindings.length > 0 && (
+                      renderListenButton('photos', `${t.whatISawInPhotos}: ${diagnosisResult.visualFindings.join('. ')}`)
+                    )}
+                  </div>
+
+                  {analyzedImagesList.length > 1 && (
+                    <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px' }}>
+                      {analyzedImagesList.map((img, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => setActiveImageIdx(idx)}
+                          aria-label={`View photo ${idx + 1}`}
+                          style={{
+                            position: 'relative',
+                            width: '60px',
+                            height: '60px',
+                            borderRadius: '8px',
+                            overflow: 'hidden',
+                            border: activeImageIdx === idx ? '2.5px solid var(--ag-color-primary-base)' : '1px solid var(--ag-border-default)',
+                            padding: 0,
+                            cursor: 'pointer',
+                            flexShrink: 0,
+                            backgroundColor: '#000',
+                          }}
+                        >
+                          <img src={img.previewUrl} alt={`Photo ${idx + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          <span style={{
+                            position: 'absolute',
+                            bottom: '2px',
+                            left: '2px',
+                            backgroundColor: 'rgba(0,0,0,0.65)',
+                            color: '#FFF',
+                            fontSize: '9px',
+                            fontWeight: 700,
+                            padding: '1px 4px',
+                            borderRadius: '2px',
+                          }}>
+                            #{idx + 1}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
                   )}
 
-                  {/* Recommended Action */}
-                  <p style={{
-                    fontSize: '13px',
-                    color: 'var(--ag-color-text-primary)',
-                    lineHeight: 1.4,
-                    marginBottom: '6px',
-                  }}>
-                    {crop.recommendedAction}
-                  </p>
+                  {analyzedImagesList[activeImageIdx] && (
+                    <div 
+                      onClick={() => setLightboxImage({ url: analyzedImagesList[activeImageIdx].previewUrl, index: activeImageIdx })}
+                      style={{
+                        position: 'relative',
+                        width: '100%',
+                        backgroundColor: '#0F172A',
+                        borderRadius: '12px',
+                        overflow: 'hidden',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        padding: '4px 0',
+                      }}
+                    >
+                      <div style={{ position: 'relative', display: 'inline-block', maxWidth: '100%', lineHeight: 0 }}>
+                        <img 
+                          src={analyzedImagesList[activeImageIdx].previewUrl} 
+                          alt={`Crop View ${activeImageIdx + 1}`}
+                          style={{ 
+                            display: 'block',
+                            maxWidth: '100%', 
+                            maxHeight: '260px', 
+                            width: 'auto', 
+                            height: 'auto',
+                            objectFit: 'contain',
+                            borderRadius: '6px',
+                          }}
+                        />
 
+                        {currentImageAnnotations.map((ann, aIdx) => (
+                          <div
+                            key={aIdx}
+                            style={{
+                              position: 'absolute',
+                              left: `${ann.x}%`,
+                              top: `${ann.y}%`,
+                              width: `${ann.width}%`,
+                              height: `${ann.height}%`,
+                              border: '2.5px solid #EF4444',
+                              backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                              borderRadius: '4px',
+                              pointerEvents: 'none',
+                              boxShadow: '0 0 0 1.5px rgba(255,255,255,0.9)',
+                              boxSizing: 'border-box',
+                            }}
+                          >
+                            <span style={{
+                              position: 'absolute',
+                              top: ann.y < 16 ? '100%' : '-22px',
+                              left: '0',
+                              backgroundColor: '#DC2626',
+                              color: '#FFFFFF',
+                              fontSize: '10px',
+                              fontWeight: 800,
+                              padding: '1px 6px',
+                              borderRadius: '3px',
+                              whiteSpace: 'nowrap',
+                              lineHeight: '1.2',
+                              zIndex: 2,
+                            }}>
+                              {ann.label}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div style={{
+                        position: 'absolute',
+                        bottom: '6px',
+                        right: '6px',
+                        backgroundColor: 'rgba(0,0,0,0.75)',
+                        color: '#FFFFFF',
+                        borderRadius: '4px',
+                        padding: '3px 6px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '3px',
+                        fontSize: '10px',
+                        fontWeight: 600,
+                        zIndex: 3,
+                      }}>
+                        <Maximize2 size={11} />
+                        <span>{t.tapToEnlarge}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {diagnosisResult.visualFindings && diagnosisResult.visualFindings.length > 0 && (
+                    <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '13px', color: 'var(--ag-color-text-primary)', lineHeight: 1.45 }}>
+                      {diagnosisResult.visualFindings.map((vf, idx) => (
+                        <li key={idx} style={{ marginBottom: '4px' }}>{vf}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {/* Actionable Remedies Column */}
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '14px',
+              }}>
+                {/* Farmer description quote if present */}
+                {(voiceTranscriptText || diagnosisResult.farmerReportedSymptoms.length > 0) && (
                   <div style={{
-                    fontSize: '11px',
-                    color: 'var(--ag-color-text-secondary)',
+                    backgroundColor: '#F8FAFC',
+                    borderRadius: '12px',
+                    border: '1px dashed #CBD5E1',
+                    padding: '12px 14px',
                   }}>
-                    {t.lastChecked}: {crop.lastInspectionDate}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <Mic size={14} color="var(--ag-color-primary-base)" />
+                        <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
+                          {t.whatYouToldAgriGuide}
+                        </span>
+                      </div>
+                      {renderListenButton('farmerQuote', `${t.whatYouToldAgriGuide}: ${voiceTranscriptText || diagnosisResult.farmerReportedSymptoms.join(' ')}`)}
+                    </div>
+                    <p style={{ margin: 0, fontStyle: 'italic', fontSize: '13px', color: '#334155', lineHeight: 1.4 }}>
+                      "{voiceTranscriptText || diagnosisResult.farmerReportedSymptoms.join(' ')}"
+                    </p>
+                  </div>
+                )}
+
+                {/* Recommendations */}
+                {diagnosisResult.recommendation && diagnosisResult.recommendation.length > 0 && (
+                  <div style={{
+                    backgroundColor: '#FFFFFF',
+                    borderRadius: '14px',
+                    border: '1px solid var(--ag-border-default)',
+                    padding: '16px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '10px',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <h4 style={{
+                        fontSize: '13px',
+                        fontWeight: 800,
+                        color: 'var(--ag-color-primary-dark)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.04em',
+                        margin: 0,
+                      }}>
+                        🎯 {t.whatYouShouldDo}
+                      </h4>
+                      {renderListenButton('remedies', `${t.whatYouShouldDo}: ${diagnosisResult.recommendation.join('. ')}`)}
+                    </div>
+                    <ol style={{
+                      margin: 0,
+                      paddingLeft: '18px',
+                      fontSize: '13.5px',
+                      color: 'var(--ag-color-text-primary)',
+                      lineHeight: 1.5,
+                    }}>
+                      {diagnosisResult.recommendation.map((rec, idx) => (
+                        <li key={idx} style={{ marginBottom: '6px' }}>{rec}</li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                {/* Things to Avoid */}
+                {diagnosisResult.whatToAvoid && diagnosisResult.whatToAvoid.length > 0 && (
+                  <div style={{
+                    backgroundColor: '#FFFBEB',
+                    borderRadius: '12px',
+                    border: '1px solid #FDE68A',
+                    padding: '12px 14px',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                      <div style={{ fontSize: '12px', fontWeight: 800, color: '#92400E', textTransform: 'uppercase' }}>
+                        🚫 {t.thingsToAvoid}
+                      </div>
+                      {renderListenButton('avoid', `${t.thingsToAvoid}: ${diagnosisResult.whatToAvoid.join('. ')}`)}
+                    </div>
+                    <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '12.5px', color: '#B45309', lineHeight: 1.4 }}>
+                      {diagnosisResult.whatToAvoid.map((avoid, idx) => (
+                        <li key={idx} style={{ marginBottom: '3px' }}>{avoid}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Monitoring Advice */}
+                {diagnosisResult.monitoringAdvice && (
+                  <div style={{
+                    backgroundColor: 'var(--ag-color-bg-base)',
+                    borderRadius: '12px',
+                    border: '1px solid var(--ag-border-default)',
+                    padding: '12px 14px',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                      <div style={{ fontSize: '12px', fontWeight: 800, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase' }}>
+                        🔍 {t.checkAgain}
+                      </div>
+                      {renderListenButton('monitoring', `${t.checkAgain}: ${diagnosisResult.monitoringAdvice}`)}
+                    </div>
+                    <p style={{ margin: 0, fontSize: '13px', color: 'var(--ag-color-text-primary)', lineHeight: 1.4 }}>
+                      {diagnosisResult.monitoringAdvice}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : isAnalyzing ? (
+          /* VIEW B: PROGRESSIVE LOADING STATE */
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '48px 16px',
+            textAlign: 'center',
+          }}>
+            <div style={{
+              width: '54px',
+              height: '54px',
+              borderRadius: '50%',
+              border: '4px solid var(--ag-color-primary-light)',
+              borderTopColor: 'var(--ag-color-primary-base)',
+              animation: 'spin 1s linear infinite',
+              marginBottom: '20px',
+            }} />
+            <h3 style={{ fontSize: '18px', fontWeight: 800, color: 'var(--ag-color-text-primary)', marginBottom: '8px' }}>
+              {consultationStep === 'investigating' 
+                ? t.investigatingPhotos 
+                : (consultationStep === 'analyzing_answer' 
+                    ? t.understandingAnswer 
+                    : (consultationStep === 'final_analyzing' ? t.synthesizingDiagnosis : t.checkingCropAgain))}
+            </h3>
+            <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', maxWidth: '380px', lineHeight: 1.45 }}>
+              {consultationStep === 'final_analyzing'
+                ? (currentLang === 'te' ? 'ఫోటోలు మరియు మీరు చెప్పిన వివరాలను పరిశీలించి తుది విశ్లేషణను సిద్ధం చేస్తున్నాము...' : 'Reviewing photo evidence and consultation details...')
+                : (currentLang === 'te' ? 'పంట చిత్రాలు మరియు సమాచారాన్ని పరిశీలిస్తున్నాము...' : (currentLang === 'hi' ? 'फसल की तस्वीरों और विवरणों का विश्लेषण किया जा रहा है...' : `Analyzing ${selectedImages.length} crop photo(s)...`))}
+            </p>
+          </div>
+        ) : consultationStep === 'consulting' && currentQuestion ? (
+          /* VIEW C: GUIDED CONSULTATION QUESTION INTERACTION */
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              backgroundColor: 'var(--ag-color-bg-base)',
+              padding: '10px 14px',
+              borderRadius: '12px',
+              border: '1px solid var(--ag-border-default)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{
+                  width: '28px',
+                  height: '28px',
+                  borderRadius: '50%',
+                  backgroundColor: 'var(--ag-color-primary-base)',
+                  color: '#FFFFFF',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '13px',
+                  fontWeight: 800,
+                }}>
+                  {currentQuestion.questionIndex}
+                </div>
+                <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--ag-color-text-primary)' }}>
+                  {t.questionProgress.replace('{current}', String(currentQuestion.questionIndex))}
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {[1, 2, 3].map((step) => (
+                  <div
+                    key={step}
+                    style={{
+                      width: '10px',
+                      height: '10px',
+                      borderRadius: '50%',
+                      backgroundColor: step <= currentQuestion.questionIndex ? 'var(--ag-color-primary-base)' : '#CBD5E1',
+                      transition: 'background-color 0.2s ease',
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Question Card */}
+            <div style={{
+              backgroundColor: '#FFFFFF',
+              border: '1.5px solid var(--ag-color-primary-base)',
+              borderRadius: '16px',
+              padding: '18px',
+              boxShadow: '0 2px 10px rgba(47, 125, 50, 0.08)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Sparkles size={16} color="var(--ag-color-primary-base)" />
+                  <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--ag-color-primary-base)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    {t.aiNoticedHeader}
+                  </span>
+                </div>
+                {renderListenButton(
+                  'crop_doctor_question',
+                  currentQuestion.text,
+                  'subtle',
+                  currentLang === 'te' ? 'ప్రశ్న వినండి' : (currentLang === 'hi' ? 'सवाल सुनें' : 'Listen to question')
+                )}
+              </div>
+
+              {currentQuestion.reason && (
+                <p style={{ margin: 0, fontSize: '13px', color: 'var(--ag-color-text-secondary)', lineHeight: 1.4 }}>
+                  {currentQuestion.reason}
+                </p>
+              )}
+
+              <h3 style={{
+                margin: '4px 0 0 0',
+                fontSize: '18px',
+                fontWeight: 800,
+                color: 'var(--ag-color-text-primary)',
+                lineHeight: 1.4,
+              }}>
+                "{currentQuestion.text}"
+              </h3>
+            </div>
+
+            {/* Answer Input Section */}
+            <div style={{
+              backgroundColor: 'var(--ag-color-bg-base)',
+              border: '1px solid var(--ag-border-default)',
+              borderRadius: '16px',
+              padding: '18px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '14px',
+            }}>
+              {isTypingQuestion ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <textarea
+                    value={typedQuestionAnswer}
+                    onChange={(e) => setTypedQuestionAnswer(e.target.value)}
+                    placeholder={t.typePlaceholder}
+                    rows={3}
+                    style={{
+                      width: '100%',
+                      padding: '12px',
+                      borderRadius: '10px',
+                      border: '1px solid var(--ag-border-default)',
+                      fontSize: '14px',
+                      color: 'var(--ag-color-text-primary)',
+                      fontFamily: 'inherit',
+                      resize: 'none',
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => handleSubmitQuestionAnswer(typedQuestionAnswer, 'text')}
+                      disabled={!typedQuestionAnswer.trim() || isSubmittingAnswer}
+                      style={{
+                        flex: 1,
+                        minHeight: '46px',
+                        backgroundColor: typedQuestionAnswer.trim() ? 'var(--ag-color-primary-base)' : '#94A3B8',
+                        color: '#FFFFFF',
+                        border: 'none',
+                        borderRadius: 'var(--ag-radius-md)',
+                        fontSize: '14px',
+                        fontWeight: 700,
+                        cursor: typedQuestionAnswer.trim() ? 'pointer' : 'not-allowed',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <Send size={16} />
+                      <span>{t.submitAnswer}</span>
+                    </button>
+                    <button
+                      onClick={() => setIsTypingQuestion(false)}
+                      style={{
+                        minHeight: '46px',
+                        padding: '0 14px',
+                        backgroundColor: 'transparent',
+                        border: '1px solid var(--ag-border-default)',
+                        borderRadius: 'var(--ag-radius-md)',
+                        fontSize: '13px',
+                        fontWeight: 600,
+                        color: 'var(--ag-color-text-secondary)',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {t.voiceInsteadBtn}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px' }}>
+                  {!questionTranscript && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' }}>
+                      <button
+                        onClick={isRecordingQuestion ? stopQuestionVoiceRecording : startQuestionVoiceRecording}
+                        disabled={isTranscribingQuestion}
+                        aria-label={isRecordingQuestion ? t.stopRecording : t.tapToAnswer}
+                        style={{
+                          width: '72px',
+                          height: '72px',
+                          borderRadius: '50%',
+                          backgroundColor: isRecordingQuestion ? 'var(--ag-color-danger-base)' : 'var(--ag-color-primary-base)',
+                          color: '#FFFFFF',
+                          border: 'none',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: isTranscribingQuestion ? 'wait' : 'pointer',
+                          boxShadow: isRecordingQuestion ? '0 0 0 8px rgba(217, 74, 69, 0.25)' : '0 4px 14px rgba(47, 125, 50, 0.28)',
+                          transition: 'all 0.2s ease',
+                        }}
+                      >
+                        {isRecordingQuestion ? <Square size={28} /> : <Mic size={32} />}
+                      </button>
+                      
+                      <div style={{ fontSize: '13px', fontWeight: 800, color: isRecordingQuestion ? 'var(--ag-color-danger-base)' : 'var(--ag-color-text-primary)', textAlign: 'center' }}>
+                        {isRecordingQuestion ? `🔴 ${t.listeningVoice}` : (isTranscribingQuestion ? `⏳ ${t.understandingAnswer}` : `🎙 ${t.tapToAnswer}`)}
+                      </div>
+                    </div>
+                  )}
+
+                  {questionTranscript && !isTranscribingQuestion && (
+                    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                      <div style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: '12px',
+                        border: '1px solid var(--ag-border-default)',
+                        padding: '14px',
+                      }}>
+                        <div style={{ fontSize: '11px', fontWeight: 800, color: 'var(--ag-color-primary-base)', textTransform: 'uppercase', marginBottom: '4px' }}>
+                          {t.youSaid}
+                        </div>
+                        <p style={{ margin: 0, fontSize: '14px', color: 'var(--ag-color-text-primary)', fontWeight: 600, lineHeight: 1.4 }}>
+                          "{questionTranscript}"
+                        </p>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '10px', width: '100%' }}>
+                        <button
+                          onClick={() => handleSubmitQuestionAnswer(questionTranscript, 'voice')}
+                          disabled={isSubmittingAnswer}
+                          style={{
+                            flex: 1,
+                            minHeight: '46px',
+                            backgroundColor: 'var(--ag-color-primary-base)',
+                            color: '#FFFFFF',
+                            border: 'none',
+                            borderRadius: 'var(--ag-radius-md)',
+                            fontSize: '14px',
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '6px',
+                          }}
+                        >
+                          <Check size={18} />
+                          <span>{t.continueBtn}</span>
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setQuestionTranscript('');
+                            startQuestionVoiceRecording();
+                          }}
+                          disabled={isSubmittingAnswer}
+                          style={{
+                            minHeight: '46px',
+                            padding: '0 16px',
+                            backgroundColor: '#FFFFFF',
+                            color: 'var(--ag-color-danger-base)',
+                            border: '1px solid #FECDCA',
+                            borderRadius: 'var(--ag-radius-md)',
+                            fontSize: '13px',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                          }}
+                        >
+                          <RotateCcw size={16} />
+                          <span>{t.recordAgainBtn}</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', borderTop: '1px solid var(--ag-border-default)', paddingTop: '10px' }}>
+                    <button
+                      onClick={() => handleSubmitQuestionAnswer(t.dontKnowBtn, 'unknown')}
+                      disabled={isSubmittingAnswer}
+                      style={{
+                        backgroundColor: '#FEF3C7',
+                        color: '#92400E',
+                        border: '1px solid #FDE68A',
+                        borderRadius: 'var(--ag-radius-full)',
+                        padding: '6px 14px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {t.dontKnowBtn}
+                    </button>
+
+                    <button
+                      onClick={() => setIsTypingQuestion(true)}
+                      disabled={isSubmittingAnswer}
+                      style={{
+                        backgroundColor: 'transparent',
+                        color: 'var(--ag-color-text-secondary)',
+                        border: 'none',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        textDecoration: 'underline',
+                      }}
+                    >
+                      {t.typeInsteadBtn}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          /* VIEW D: DIRECT UPLOAD & SYMPT WORKSPACE (PRIMARY TOP SECTION) */
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            {/* Step 1 Title */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{
+                  backgroundColor: 'var(--ag-color-primary-base)',
+                  color: '#FFFFFF',
+                  width: '24px',
+                  height: '24px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '12px',
+                  fontWeight: 800,
+                }}>
+                  1
+                </span>
+                <h3 style={{ fontSize: '16px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: 0 }}>
+                  {currentLang === 'te' ? 'పంట సమస్యను అప్‌లోడ్ చేయండి' : (currentLang === 'hi' ? 'फसल समस्या अपलोड करें' : 'Upload a Crop Problem')}
+                </h3>
+              </div>
+
+              <span style={{ fontSize: '12px', color: 'var(--ag-color-text-secondary)', fontWeight: 600 }}>
+                {selectedImages.length} / 5 {t.photosAnalyzed.toLowerCase()}
+              </span>
+            </div>
+
+            {/* Crop Selector (Pills for fast 1-tap choice + select dropdown) */}
+            <div>
+              <label style={{ fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', display: 'block', marginBottom: '8px' }}>
+                {currentLang === 'te' ? 'పంటను ఎంచుకోండి:' : (currentLang === 'hi' ? 'फसल चुनें:' : 'Select Crop:')}
+              </label>
+              
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                {availableCropsList.map((cropName) => {
+                  const isSelected = selectedCropName.toLowerCase() === cropName.toLowerCase();
+                  return (
+                    <button
+                      key={cropName}
+                      type="button"
+                      onClick={() => setSelectedCropName(cropName)}
+                      style={{
+                        padding: '8px 14px',
+                        borderRadius: 'var(--ag-radius-full)',
+                        border: isSelected ? '2px solid var(--ag-color-primary-base)' : '1px solid var(--ag-border-default)',
+                        backgroundColor: isSelected ? 'var(--ag-color-primary-light)' : 'var(--ag-color-bg-base)',
+                        color: isSelected ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-primary)',
+                        fontWeight: isSelected ? 800 : 600,
+                        fontSize: '13px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        transition: 'all 0.15s ease',
+                      }}
+                    >
+                      <span>{getCropEmoji(cropName)}</span>
+                      <span>{localizeCropName(cropName, currentLang)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Photo Upload Area */}
+            <div>
+              <label style={{ fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', display: 'block', marginBottom: '8px' }}>
+                {currentLang === 'te' ? 'పంట లేదా ఆకు ఫోటోలు (కనీసం 1, గరిష్టంగా 5):' : (currentLang === 'hi' ? 'फसल या पत्ती की तस्वीरें (न्यूनतम 1, अधिकतम 5):' : 'Crop or Leaf Photos (Min 1, Max 5):')}
+              </label>
+
+              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
+                {/* Photo Previews */}
+                {selectedImages.map((img, idx) => (
+                  <div 
+                    key={idx}
+                    style={{
+                      position: 'relative',
+                      width: '90px',
+                      height: '90px',
+                      borderRadius: '12px',
+                      overflow: 'hidden',
+                      border: '2px solid var(--ag-color-primary-base)',
+                      boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+                    }}
+                  >
+                    <img 
+                      src={img.previewUrl} 
+                      alt={`Uploaded view ${idx + 1}`}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    />
+                    <button
+                      onClick={() => handleRemoveImage(idx)}
+                      aria-label={`Remove photo ${idx + 1}`}
+                      style={{
+                        position: 'absolute',
+                        top: '4px',
+                        right: '4px',
+                        backgroundColor: 'rgba(0,0,0,0.65)',
+                        color: '#FFFFFF',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '22px',
+                        height: '22px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <X size={12} />
+                    </button>
+                    <span style={{
+                      position: 'absolute',
+                      bottom: '2px',
+                      left: '4px',
+                      backgroundColor: 'rgba(0,0,0,0.6)',
+                      color: '#FFF',
+                      fontSize: '9px',
+                      fontWeight: 700,
+                      padding: '1px 4px',
+                      borderRadius: '3px',
+                    }}>
+                      #{idx + 1}
+                    </span>
+                  </div>
+                ))}
+
+                {/* Add Photo Button / Dropzone */}
+                {selectedImages.length < 5 && (
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label="Upload crop photo"
+                    style={{
+                      width: selectedImages.length === 0 ? '100%' : '90px',
+                      minHeight: selectedImages.length === 0 ? '110px' : '90px',
+                      borderRadius: '14px',
+                      border: '2px dashed var(--ag-color-primary-base)',
+                      backgroundColor: 'var(--ag-color-primary-light)',
+                      display: 'flex',
+                      flexDirection: selectedImages.length === 0 ? 'row' : 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: selectedImages.length === 0 ? '14px' : '4px',
+                      padding: '12px',
+                      cursor: 'pointer',
+                      color: 'var(--ag-color-primary-dark)',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <div style={{
+                      width: '42px',
+                      height: '42px',
+                      borderRadius: '50%',
+                      backgroundColor: '#FFFFFF',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      border: '1px solid #86EFAC',
+                      flexShrink: 0,
+                    }}>
+                      <Camera size={22} color="var(--ag-color-primary-base)" />
+                    </div>
+                    <div style={{ textAlign: selectedImages.length === 0 ? 'left' : 'center' }}>
+                      <div style={{ fontSize: '13px', fontWeight: 800 }}>
+                        {selectedImages.length === 0 
+                          ? (currentLang === 'te' ? 'ఫోటో తీయండి లేదా గ్యాలరీ నుండి అప్‌లోడ్ చేయండి' : (currentLang === 'hi' ? 'फोटो लें या गैलरी से चुनें' : 'Take Photo / Upload Leaf Images'))
+                          : (currentLang === 'te' ? '+ ఇంకోటి' : '+ Add')}
+                      </div>
+                      {selectedImages.length === 0 && (
+                        <div style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)', marginTop: '2px' }}>
+                          {currentLang === 'te' ? 'ఆకులు, కాండం లేదా మొత్తం మొక్క స్పష్టమైన చిత్రం' : 'Clear photos of leaves, stems, or affected spots'}
+                        </div>
+                      )}
+                    </div>
+                  </button>
+                )}
+              </div>
+
+              <input 
+                type="file" 
+                accept="image/*" 
+                multiple 
+                ref={fileInputRef} 
+                style={{ display: 'none' }} 
+                onChange={handleImageSelect}
+              />
+            </div>
+
+            {/* Voice Recording / Symptoms Box */}
+            <div>
+              <label style={{ fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', display: 'block', marginBottom: '8px' }}>
+                {currentLang === 'te' ? 'లక్షణాలు లేదా సమస్య వివరాలు (వాయిస్ లేదా రాయండి):' : (currentLang === 'hi' ? 'लक्षण या समस्या का विवरण (बोलें या लिखें):' : 'Describe Symptoms (Voice or Spoken Notes):')}
+              </label>
+
+              <div style={{
+                border: isRecording ? '1.5px solid var(--ag-color-danger-base)' : '1px solid var(--ag-border-default)',
+                borderRadius: '14px',
+                padding: '14px',
+                backgroundColor: isRecording ? '#FEF3F2' : 'var(--ag-color-bg-base)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '10px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <button
+                      type="button"
+                      onClick={isRecording ? stopVoiceRecording : startVoiceRecording}
+                      aria-label={isRecording ? 'Stop recording voice' : 'Start recording voice'}
+                      style={{
+                        width: '46px',
+                        height: '46px',
+                        borderRadius: '50%',
+                        backgroundColor: isRecording ? 'var(--ag-color-danger-base)' : 'var(--ag-color-primary-base)',
+                        color: '#FFFFFF',
+                        border: 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        flexShrink: 0,
+                        boxShadow: isRecording ? '0 0 0 6px rgba(239, 68, 68, 0.2)' : 'none',
+                      }}
+                    >
+                      {isRecording ? <Square size={18} /> : <Mic size={22} />}
+                    </button>
+
+                    <div>
+                      <div style={{ fontSize: '13px', fontWeight: 800, color: isRecording ? 'var(--ag-color-danger-base)' : 'var(--ag-color-text-primary)' }}>
+                        {isRecording 
+                          ? (currentLang === 'te' ? '🔴 వింటున్నాము... ఆపడానికి నొక్కండి' : '🔴 Listening... Tap to stop')
+                          : (recordedAudioBlob 
+                              ? (currentLang === 'te' ? 'వాయిస్ రికార్డింగ్ సిద్ధంగా ఉంది' : 'Voice description recorded')
+                              : (currentLang === 'te' ? '🎙 మాట్లాడటానికి నొక్కండి (తెలుగు / హిందీ / English)' : '🎙 Tap to speak in Telugu, Hindi, or English'))}
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)' }}>
+                        {currentLang === 'te' ? 'మచ్చలు, పసుపు రంగు, పురుగులు లేదా వాతావరణాన్ని వివరించండి' : 'Describe yellowing, spots, insect activity, or duration'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {recordedAudioBlob && !isRecording && (
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        type="button"
+                        onClick={playRecordedAudio}
+                        style={{
+                          background: '#FFFFFF',
+                          border: '1px solid var(--ag-border-default)',
+                          borderRadius: '6px',
+                          color: 'var(--ag-color-primary-base)',
+                          cursor: 'pointer',
+                          padding: '6px 10px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontSize: '12px',
+                          fontWeight: 700,
+                        }}
+                      >
+                        <Play size={14} />
+                        <span>{currentLang === 'te' ? 'వినండి' : 'Play'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={clearVoiceRecording}
+                        style={{
+                          background: '#FFFFFF',
+                          border: '1px solid #FECDCA',
+                          borderRadius: '6px',
+                          color: 'var(--ag-color-danger-base)',
+                          cursor: 'pointer',
+                          padding: '6px 10px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontSize: '12px',
+                          fontWeight: 700,
+                        }}
+                      >
+                        <RotateCcw size={14} />
+                        <span>{currentLang === 'te' ? 'మళ్లీ' : 'Reset'}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Spoken Text / Live Transcript */}
+                {(isRecording || voiceTranscriptText) && (
+                  <div style={{
+                    backgroundColor: '#FFFFFF',
+                    border: '1px solid var(--ag-border-default)',
+                    borderRadius: '8px',
+                    padding: '8px 12px',
+                    fontSize: '13px',
+                  }}>
+                    <div style={{ fontSize: '10px', fontWeight: 800, color: 'var(--ag-color-primary-base)', marginBottom: '2px', textTransform: 'uppercase' }}>
+                      {getLiveVoiceLabel()}:
+                    </div>
+                    <div style={{ color: 'var(--ag-color-text-primary)' }}>
+                      {voiceTranscriptText || liveFinalTranscript || liveInterimTranscript || (currentLang === 'te' ? 'మాట్లాడండి...' : 'Speak now...')}
+                    </div>
+                  </div>
+                )}
+
+                {recordedAudioUrl && (
+                  <audio ref={audioPlayerRef} src={recordedAudioUrl} style={{ display: 'none' }} />
+                )}
+              </div>
+            </div>
+
+            {/* Mismatch Error if triggered */}
+            {mismatchError && (
+              <div style={{
+                backgroundColor: '#FEF3F2',
+                border: '1.5px solid #FECDCA',
+                borderRadius: '12px',
+                padding: '14px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                  <AlertOctagon size={18} color="var(--ag-color-danger-base)" />
+                  <span style={{ fontSize: '13px', fontWeight: 800, color: 'var(--ag-color-danger-base)' }}>
+                    ⚠️ {currentLang === 'te' ? 'పంట వివరాలలో తేడా ఉంది' : 'Crop Input Mismatch'}
+                  </span>
+                </div>
+                <p style={{ margin: 0, fontSize: '13px', color: '#991B1B', lineHeight: 1.4 }}>
+                  {mismatchError.notice}
+                </p>
+              </div>
+            )}
+
+            {/* General error if any */}
+            {errorMessage && (
+              <div style={{
+                backgroundColor: '#FEF3F2',
+                border: '1px solid #FECDCA',
+                borderRadius: '10px',
+                padding: '10px 14px',
+                fontSize: '13px',
+                color: '#B42318',
+              }}>
+                {errorMessage}
+              </div>
+            )}
+
+            {/* Big Action Button */}
+            <button
+              onClick={handleRunAnalysis}
+              disabled={selectedImages.length === 0}
+              style={{
+                width: '100%',
+                minHeight: '50px',
+                backgroundColor: selectedImages.length > 0 ? 'var(--ag-color-primary-base)' : '#94A3B8',
+                color: '#FFFFFF',
+                border: 'none',
+                borderRadius: 'var(--ag-radius-md)',
+                fontSize: '15px',
+                fontWeight: 800,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                cursor: selectedImages.length > 0 ? 'pointer' : 'not-allowed',
+                boxShadow: selectedImages.length > 0 ? 'var(--ag-shadow-button)' : 'none',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <Sparkles size={18} />
+              <span>
+                {selectedImages.length === 0
+                  ? (currentLang === 'te' ? 'విశ్లేషించడానికి కనీసం ఒక ఫోటో తీయండి' : 'Add at least 1 photo to diagnose')
+                  : (currentLang === 'te' 
+                      ? `పంటను విశ్లేషించండి (${selectedImages.length} ఫోటోలు ${recordedAudioBlob ? '+ వాయిస్' : ''})` 
+                      : (currentLang === 'hi'
+                          ? `फसल का विश्लेषण करें (${selectedImages.length} तस्वीरें ${recordedAudioBlob ? '+ आवाज' : ''})`
+                          : `Analyze Crop (${selectedImages.length} Photos ${recordedAudioBlob ? '+ Voice' : ''})`))}
+              </span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ========================================================================= */}
+      {/* 3. BOTTOM SECTION: PAST DIAGNOSES & HISTORY DIRECTLY ON THIS PAGE         */}
+      {/* ========================================================================= */}
+      <div 
+        id="crop-doctor-history-section"
+        style={{
+          backgroundColor: '#FFFFFF',
+          borderRadius: '20px',
+          border: '1.5px solid var(--ag-border-default)',
+          padding: '24px',
+          boxShadow: '0 2px 10px rgba(0,0,0,0.03)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '16px',
+        }}
+      >
+        {/* Section Header with count and refresh */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{
+              backgroundColor: 'var(--ag-color-primary-base)',
+              color: '#FFFFFF',
+              width: '24px',
+              height: '24px',
+              borderRadius: '50%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: '12px',
+              fontWeight: 800,
+            }}>
+              2
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: 0 }}>
+                {currentLang === 'te' ? 'గత నిర్ధారణలు మరియు ఆరోగ్య చరిత్ర' : (currentLang === 'hi' ? 'पिछला निदान और इतिहास' : 'Past Crop Diagnoses & Health Records')}
+              </h3>
+              {historyList.length > 0 && (
+                <span style={{
+                  backgroundColor: 'var(--ag-color-primary-light)',
+                  color: 'var(--ag-color-primary-dark)',
+                  fontSize: '11px',
+                  fontWeight: 800,
+                  padding: '2px 8px',
+                  borderRadius: '10px',
+                }}>
+                  {historyList.length}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <button
+            onClick={loadHistory}
+            disabled={isLoadingHistory}
+            aria-label="Refresh history records"
+            style={{
+              background: 'none',
+              border: '1px solid var(--ag-border-default)',
+              borderRadius: 'var(--ag-radius-sm)',
+              color: 'var(--ag-color-primary-base)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '12px',
+              fontWeight: 700,
+              padding: '6px 12px',
+            }}
+          >
+            <RefreshCw size={13} className={isLoadingHistory ? 'animate-spin' : ''} />
+            <span>{isLoadingHistory ? '...' : (currentLang === 'te' ? 'తాజాకరించండి' : (currentLang === 'hi' ? 'ताज़ा करें' : 'Refresh'))}</span>
+          </button>
+        </div>
+
+        {/* History List or Empty State */}
+        {isLoadingHistory ? (
+          <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--ag-color-text-secondary)', fontSize: '13px' }}>
+            <div style={{
+              width: '28px',
+              height: '28px',
+              borderRadius: '50%',
+              border: '3px solid var(--ag-color-primary-light)',
+              borderTopColor: 'var(--ag-color-primary-base)',
+              animation: 'spin 1s linear infinite',
+              margin: '0 auto 10px auto',
+            }} />
+            <span>{t.loadingHistory}</span>
+          </div>
+        ) : historyList.length === 0 ? (
+          <div style={{
+            backgroundColor: 'var(--ag-color-bg-base)',
+            borderRadius: '14px',
+            border: '1.5px dashed var(--ag-border-default)',
+            padding: '30px 20px',
+            textAlign: 'center',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: '8px',
+          }}>
+            <div style={{
+              width: '44px',
+              height: '44px',
+              borderRadius: '50%',
+              backgroundColor: '#FFFFFF',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              border: '1px solid var(--ag-border-default)',
+            }}>
+              <History size={20} color="var(--ag-color-text-secondary)" />
+            </div>
+            <h4 style={{ fontSize: '14px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: 0 }}>
+              {t.noAssessmentsYet}
+            </h4>
+            <p style={{ fontSize: '12px', color: 'var(--ag-color-text-secondary)', maxWidth: '340px', margin: 0, lineHeight: 1.4 }}>
+              {currentLang === 'te' 
+                ? 'ఇప్పటివరకు పంట నిర్ధారణలు లేవు. మీ పంట ఫోటోను పైన అప్‌లోడ్ చేసి మొదటి విశ్లేషణను పొందండి!' 
+                : 'No past diagnoses recorded yet. Take or upload a photo above to start your first assessment!'}
+            </p>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {historyList.map((item) => {
+              const isProblem = item.status === 'problem_detected';
+              const isHealthy = item.status === 'no_issue';
+
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => handleOpenHistoricalItem(item)}
+                  style={{
+                    backgroundColor: 'var(--ag-color-bg-base)',
+                    borderRadius: '12px',
+                    border: '1px solid var(--ag-border-default)',
+                    padding: '12px 14px',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: '12px',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = '#FFFFFF';
+                    e.currentTarget.style.borderColor = 'var(--ag-color-primary-base)';
+                    e.currentTarget.style.boxShadow = '0 2px 8px rgba(47, 125, 50, 0.08)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'var(--ag-color-bg-base)';
+                    e.currentTarget.style.borderColor = 'var(--ag-border-default)';
+                    e.currentTarget.style.boxShadow = 'none';
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1, minWidth: 0 }}>
+                    {/* Thumbnail or Fallback Emoji */}
+                    {item.thumbnailSignedUrl ? (
+                      <img 
+                        src={item.thumbnailSignedUrl} 
+                        alt={item.cropName} 
+                        style={{ width: '46px', height: '46px', borderRadius: '10px', objectFit: 'cover', flexShrink: 0, border: '1px solid var(--ag-border-default)' }}
+                      />
+                    ) : (
+                      <div style={{
+                        width: '46px',
+                        height: '46px',
+                        borderRadius: '10px',
+                        backgroundColor: isProblem ? '#FEE2E2' : (isHealthy ? 'var(--ag-color-primary-light)' : '#FEF3C7'),
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: '20px',
+                        flexShrink: 0,
+                      }}>
+                        {getCropEmoji(item.cropName)}
+                      </div>
+                    )}
+
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '2px' }}>
+                        <span style={{ fontSize: '14px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
+                          {getCropEmoji(item.cropName)} {localizeCropName(item.cropName, currentLang)}
+                        </span>
+
+                        <span style={{
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          padding: '1px 8px',
+                          borderRadius: 'var(--ag-radius-full)',
+                          backgroundColor: isProblem ? '#FEE2E2' : (isHealthy ? '#DCFCE7' : '#FEF3C7'),
+                          color: isProblem ? '#991B1B' : (isHealthy ? '#166534' : '#92400E'),
+                          border: `1px solid ${isProblem ? '#FCA5A5' : (isHealthy ? '#86EFAC' : '#FDE047')}`,
+                        }}>
+                          {isProblem ? t.possibleProblem : (isHealthy ? t.cropLooksHealthy : t.needClearerLook)}
+                        </span>
+                      </div>
+
+                      <div style={{
+                        fontSize: '13px',
+                        fontWeight: 600,
+                        color: isProblem ? '#991B1B' : 'var(--ag-color-text-primary)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        marginBottom: '3px',
+                      }}>
+                        {localizeDiagnosisTitle(item.diagnosisTitle, currentLang)}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: 'var(--ag-color-text-secondary)', flexWrap: 'wrap' }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                          <Camera size={12} />
+                          {item.imageCount} {t.photosAnalyzed.toLowerCase()}
+                        </span>
+                        <span>•</span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                          <Mic size={12} />
+                          {item.voiceContextUsed ? t.voiceIncluded : t.noVoice}
+                        </span>
+                        <span>•</span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                          <Clock size={12} />
+                          {formatRelativeDateLocalized(item.createdAt, currentLang)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--ag-color-primary-base)', fontSize: '12px', fontWeight: 700, flexShrink: 0 }}>
+                    <span>{currentLang === 'te' ? 'చూడండి' : (currentLang === 'hi' ? 'देखें' : 'View')}</span>
+                    <ArrowUpRight size={14} />
                   </div>
                 </div>
               );
             })}
           </div>
-        </div>
+        )}
       </div>
 
       {/* ========================================================================= */}
-      {/* CROP DOCTOR MULTIMODAL MODAL EXPERIENCE (Photos + Voice + History) */}
-      {/* ========================================================================= */}
-      {showDoctorModal && (
-        <div 
-          style={{
-            position: 'fixed',
-            inset: 0,
-            backgroundColor: 'rgba(25, 53, 42, 0.65)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 100,
-            padding: '16px',
-          }} 
-          onClick={() => { if (!isAnalyzing) handleResetModal(); }}
-        >
-          <div 
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              backgroundColor: '#FFFFFF',
-              width: '100%',
-              maxWidth: '680px',
-              maxHeight: '92vh',
-              overflowY: 'auto',
-              borderRadius: '24px',
-              padding: '24px',
-              boxShadow: 'var(--ag-shadow-modal)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '18px',
-            }}
-          >
-            {/* Modal Header with Tabs */}
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{
-                    width: '38px',
-                    height: '38px',
-                    borderRadius: '10px',
-                    backgroundColor: 'var(--ag-color-primary-light)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}>
-                    <Camera size={20} color="var(--ag-color-primary-base)" />
-                  </div>
-                  <div>
-                    <h3 style={{ fontSize: '18px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: 0 }}>
-                      AgriGuide Crop Doctor
-                    </h3>
-                    <p style={{ fontSize: '12px', color: 'var(--ag-color-text-secondary)', margin: 0 }}>
-                      {currentLang === 'te' ? 'ఫోటోలు + వాయిస్ పంట ఆరోగ్య విశ్లేషణ' : (currentLang === 'hi' ? 'तस्वीरें + आवाज फसल स्वास्थ्य मूल्यांकन' : 'Multimodal Photos + Voice Assessment')}
-                    </p>
-                  </div>
-                </div>
-
-                {!isAnalyzing && (
-                  <button 
-                    onClick={handleResetModal}
-                    aria-label="Close Crop Doctor"
-                    style={{ 
-                      background: 'none', 
-                      border: 'none', 
-                      cursor: 'pointer', 
-                      padding: '8px',
-                      minWidth: '40px',
-                      minHeight: '40px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      borderRadius: '50%',
-                    }}
-                  >
-                    <X size={22} color="var(--ag-color-text-secondary)" />
-                  </button>
-                )}
-              </div>
-
-              {/* Navigation Tabs (Assess vs History) */}
-              {!diagnosisResult && !isAnalyzing && (
-                <div style={{
-                  display: 'flex',
-                  gap: '8px',
-                  backgroundColor: 'var(--ag-color-bg-base)',
-                  padding: '4px',
-                  borderRadius: '12px',
-                  border: '1px solid var(--ag-border-default)',
-                }}>
-                  <button
-                    onClick={() => setActiveTab('assess')}
-                    style={{
-                      flex: 1,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '6px',
-                      padding: '8px 14px',
-                      borderRadius: '8px',
-                      border: 'none',
-                      backgroundColor: activeTab === 'assess' ? '#FFFFFF' : 'transparent',
-                      color: activeTab === 'assess' ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-secondary)',
-                      fontWeight: activeTab === 'assess' ? 800 : 600,
-                      fontSize: '13px',
-                      cursor: 'pointer',
-                      boxShadow: activeTab === 'assess' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
-                      minHeight: '38px',
-                    }}
-                  >
-                    <Camera size={16} />
-                    <span>{t.assessCropTab}</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setActiveTab('history');
-                      loadHistory();
-                    }}
-                    style={{
-                      flex: 1,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '6px',
-                      padding: '8px 14px',
-                      borderRadius: '8px',
-                      border: 'none',
-                      backgroundColor: activeTab === 'history' ? '#FFFFFF' : 'transparent',
-                      color: activeTab === 'history' ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-secondary)',
-                      fontWeight: activeTab === 'history' ? 800 : 600,
-                      fontSize: '13px',
-                      cursor: 'pointer',
-                      boxShadow: activeTab === 'history' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
-                      minHeight: '38px',
-                    }}
-                  >
-                    <History size={16} />
-                    <span>{t.historyTab}</span>
-                    {historyList.length > 0 && (
-                      <span style={{
-                        backgroundColor: activeTab === 'history' ? 'var(--ag-color-primary-light)' : '#E2E8F0',
-                        color: activeTab === 'history' ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-secondary)',
-                        fontSize: '11px',
-                        fontWeight: 800,
-                        padding: '1px 6px',
-                        borderRadius: '10px',
-                      }}>
-                        {historyList.length}
-                      </span>
-                    )}
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* TAB 1: HISTORY VIEW */}
-            {activeTab === 'history' && !diagnosisResult && !isAnalyzing ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <h4 style={{ fontSize: '14px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: 0, textTransform: 'uppercase', letterSpacing: '0.03em' }}>
-                    {t.doctorHistoryTitle}
-                  </h4>
-                  <button
-                    onClick={loadHistory}
-                    disabled={isLoadingHistory}
-                    aria-label="Refresh history"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: 'var(--ag-color-primary-base)',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '4px',
-                      fontSize: '12px',
-                      fontWeight: 700,
-                      padding: '4px 8px',
-                      minHeight: '36px',
-                    }}
-                  >
-                    <RefreshCw size={14} className={isLoadingHistory ? 'animate-spin' : ''} />
-                    <span>{isLoadingHistory ? '...' : 'Refresh'}</span>
-                  </button>
-                </div>
-
-                {isLoadingHistory ? (
-                  <div style={{ textAlign: 'center', padding: '36px 16px', color: 'var(--ag-color-text-secondary)', fontSize: '13px' }}>
-                    <div style={{
-                      width: '32px',
-                      height: '32px',
-                      borderRadius: '50%',
-                      border: '3px solid var(--ag-color-primary-light)',
-                      borderTopColor: 'var(--ag-color-primary-base)',
-                      animation: 'spin 1s linear infinite',
-                      margin: '0 auto 12px auto',
-                    }} />
-                    <span>{t.loadingHistory}</span>
-                  </div>
-                ) : historyList.length === 0 ? (
-                  /* Honest Empty State - Strictly NO Mock Data */
-                  <div style={{
-                    backgroundColor: 'var(--ag-color-bg-base)',
-                    borderRadius: '16px',
-                    border: '1.5px dashed var(--ag-border-default)',
-                    padding: '36px 20px',
-                    textAlign: 'center',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: '10px',
-                  }}>
-                    <div style={{
-                      width: '48px',
-                      height: '48px',
-                      borderRadius: '50%',
-                      backgroundColor: '#FFFFFF',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      border: '1px solid var(--ag-border-default)',
-                    }}>
-                      <History size={24} color="var(--ag-color-text-secondary)" />
-                    </div>
-                    <h5 style={{ fontSize: '15px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: 0 }}>
-                      {t.noAssessmentsYet}
-                    </h5>
-                    <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', maxWidth: '340px', margin: 0, lineHeight: 1.4 }}>
-                      {t.noAssessmentsDesc}
-                    </p>
-                    <button
-                      onClick={() => setActiveTab('assess')}
-                      style={{
-                        marginTop: '8px',
-                        backgroundColor: 'var(--ag-color-primary-base)',
-                        color: '#FFFFFF',
-                        border: 'none',
-                        padding: '10px 18px',
-                        borderRadius: 'var(--ag-radius-full)',
-                        fontSize: '13px',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                        minHeight: '40px',
-                      }}
-                    >
-                      {t.diagnoseCta}
-                    </button>
-                  </div>
-                ) : (
-                  /* Supabase History Records List */
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '58vh', overflowY: 'auto' }}>
-                    {historyList.map((item) => {
-                      const isProblem = item.status === 'problem_detected';
-                      const isHealthy = item.status === 'no_issue';
-
-                      return (
-                        <div
-                          key={item.id}
-                          onClick={() => handleOpenHistoricalItem(item)}
-                          style={{
-                            backgroundColor: 'var(--ag-color-bg-base)',
-                            borderRadius: '14px',
-                            border: '1px solid var(--ag-border-default)',
-                            padding: '14px 16px',
-                            cursor: 'pointer',
-                            transition: 'all 0.15s ease',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            gap: '12px',
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.backgroundColor = '#FFFFFF';
-                            e.currentTarget.style.borderColor = 'var(--ag-color-primary-base)';
-                            e.currentTarget.style.boxShadow = '0 2px 8px rgba(47, 125, 50, 0.1)';
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.backgroundColor = 'var(--ag-color-bg-base)';
-                            e.currentTarget.style.borderColor = 'var(--ag-border-default)';
-                            e.currentTarget.style.boxShadow = 'none';
-                          }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1, minWidth: 0 }}>
-                            {/* Thumbnail or Fallback Emoji */}
-                            {item.thumbnailSignedUrl ? (
-                              <img 
-                                src={item.thumbnailSignedUrl} 
-                                alt={item.cropName} 
-                                style={{ width: '48px', height: '48px', borderRadius: '10px', objectFit: 'cover', flexShrink: 0, border: '1px solid var(--ag-border-default)' }}
-                              />
-                            ) : (
-                              <div style={{
-                                width: '48px',
-                                height: '48px',
-                                borderRadius: '10px',
-                                backgroundColor: isProblem ? '#FEE2E2' : (isHealthy ? 'var(--ag-color-primary-light)' : '#FEF3C7'),
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                fontSize: '22px',
-                                flexShrink: 0,
-                              }}>
-                                {getCropEmoji(item.cropName)}
-                              </div>
-                            )}
-
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '2px' }}>
-                                <span style={{ fontSize: '14px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
-                                  {getCropEmoji(item.cropName)} {item.cropName}
-                                </span>
-
-                                <span style={{
-                                  fontSize: '11px',
-                                  fontWeight: 700,
-                                  padding: '2px 8px',
-                                  borderRadius: 'var(--ag-radius-full)',
-                                  backgroundColor: isProblem ? '#FEE2E2' : (isHealthy ? '#DCFCE7' : '#FEF3C7'),
-                                  color: isProblem ? '#991B1B' : (isHealthy ? '#166534' : '#92400E'),
-                                  border: `1px solid ${isProblem ? '#FCA5A5' : (isHealthy ? '#86EFAC' : '#FDE047')}`,
-                                }}>
-                                  {isProblem ? t.possibleProblem : (isHealthy ? t.cropLooksHealthy : t.needClearerLook)}
-                                </span>
-                              </div>
-
-                              <div style={{
-                                fontSize: '13px',
-                                fontWeight: 600,
-                                color: isProblem ? '#991B1B' : 'var(--ag-color-text-primary)',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                                marginBottom: '4px',
-                              }}>
-                                {item.diagnosisTitle}
-                              </div>
-
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '11px', color: 'var(--ag-color-text-secondary)', flexWrap: 'wrap' }}>
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
-                                  <Camera size={12} />
-                                  {item.imageCount} {t.photosAnalyzed.toLowerCase()}
-                                </span>
-                                <span>•</span>
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
-                                  <Mic size={12} />
-                                  {item.voiceContextUsed ? t.voiceIncluded : t.noVoice}
-                                </span>
-                                <span>•</span>
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
-                                  <Clock size={12} />
-                                  {formatDiagnosisDate(item.createdAt)}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-
-                          <ChevronRight size={18} color="var(--ag-color-text-secondary)" style={{ flexShrink: 0 }} />
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            ) : null}
-
-            {/* TAB 2 & RESULTS: CLEAN FARMER-FIRST RESULT SCREEN */}
-            {diagnosisResult ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                
-                {/* TOP BAR: Save Confirmation Status + Global Listen Action */}
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  flexWrap: 'wrap',
-                  gap: '10px',
-                  paddingBottom: '4px',
-                  borderBottom: '1px solid var(--ag-border-default)',
-                }}>
-                  {/* Left: Save Confirmation Badge */}
-                  <div>
-                    {saveStatus === 'saved' ? (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                          backgroundColor: '#DCFCE7',
-                          color: '#166534',
-                          border: '1px solid #86EFAC',
-                          padding: '3px 10px',
-                          borderRadius: 'var(--ag-radius-full)',
-                          fontSize: '12px',
-                          fontWeight: 700,
-                        }}>
-                          <ShieldCheck size={14} />
-                          {isHistoricalView ? t.reconstructedRecord : t.assessmentSaved}
-                        </span>
-                        <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)' }}>
-                          {t.savedToHistory}
-                        </span>
-                      </div>
-                    ) : saveStatus === 'failed' ? (
-                      <span style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        backgroundColor: '#FEE2E2',
-                        color: '#991B1B',
-                        border: '1px solid #FCA5A5',
-                        padding: '3px 10px',
-                        borderRadius: 'var(--ag-radius-full)',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                      }}>
-                        <AlertTriangle size={14} />
-                        {t.assessmentSaveFailed}
-                      </span>
-                    ) : null}
-                  </div>
-
-                  {/* Right: One Prominent Global Read-Aloud Action */}
-                  <button
-                    onClick={handleSpeakFullAssessment}
-                    aria-label="Listen to assessment"
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      backgroundColor: speakingSection === 'global' ? 'var(--ag-color-primary-base)' : 'var(--ag-color-primary-light)',
-                      color: speakingSection === 'global' ? '#FFFFFF' : 'var(--ag-color-primary-dark)',
-                      border: '1.5px solid #86EFAC',
-                      padding: '10px 18px',
-                      borderRadius: 'var(--ag-radius-full)',
-                      fontSize: '13px',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      minHeight: '48px',
-                      boxShadow: '0 2px 6px rgba(47, 125, 50, 0.12)',
-                      transition: 'all 0.2s ease',
-                    }}
-                  >
-                    {speakingSection === 'global' ? <VolumeX size={18} /> : <Volume2 size={18} />}
-                    <span>{speakingSection === 'global' ? t.stopListening : t.listenAssessment}</span>
-                  </button>
-                </div>
-
-                {/* COMPACT STATUS HERO */}
-                {(() => {
-                  const strength = getEvidenceStrengthBadge();
-                  const isProblem = diagnosisResult.status === 'problem_detected';
-                  const isHealthy = diagnosisResult.status === 'no_issue';
-                  const isUncertain = diagnosisResult.status === 'uncertain';
-
-                  return (
-                    <div style={{
-                      backgroundColor: isProblem ? '#FEF2F2' : (isHealthy ? 'var(--ag-color-primary-light)' : '#FFFBEB'),
-                      border: `1.5px solid ${isProblem ? '#FCA5A5' : (isHealthy ? '#86EFAC' : '#FDE68A')}`,
-                      borderRadius: '16px',
-                      padding: '16px 18px',
-                    }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', flexWrap: 'wrap', gap: '6px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          {isProblem && <AlertOctagon size={18} color="#991B1B" />}
-                          {isHealthy && <CheckCircle size={18} color="#166534" />}
-                          {isUncertain && <HelpCircle size={18} color="#92400E" />}
-                          <span style={{
-                            fontSize: '12px',
-                            fontWeight: 800,
-                            color: isProblem ? '#991B1B' : (isHealthy ? '#166534' : '#92400E'),
-                            textTransform: 'uppercase',
-                            letterSpacing: '0.04em',
-                          }}>
-                            {isProblem ? t.possibleProblem : (isHealthy ? t.cropLooksHealthy : t.needClearerLook)}
-                          </span>
-                        </div>
-
-                        {/* Evidence Strength Badge (Derived cleanly without fake percentages) */}
-                        {strength && (
-                          <span style={{
-                            fontSize: '11px',
-                            fontWeight: 700,
-                            padding: '2px 8px',
-                            borderRadius: 'var(--ag-radius-full)',
-                            backgroundColor: strength.bg,
-                            color: strength.color,
-                            border: `1px solid ${strength.border}`,
-                          }}>
-                            {strength.label}
-                          </span>
-                        )}
-                      </div>
-
-                      <h4 style={{
-                        fontSize: '18px',
-                        fontWeight: 800,
-                        color: isProblem ? '#7F1D1D' : (isHealthy ? 'var(--ag-color-primary-dark)' : '#78350F'),
-                        margin: '0 0 6px 0',
-                        lineHeight: 1.3,
-                      }}>
-                        {getCropEmoji(diagnosisResult.selectedCrop)} {diagnosisResult.diagnosisTitle}
-                      </h4>
-
-                      <p style={{
-                        fontSize: '13.5px',
-                        color: isProblem ? '#991B1B' : (isHealthy ? '#14532D' : '#92400E'),
-                        margin: 0,
-                        lineHeight: 1.45,
-                      }}>
-                        {isHealthy ? t.noObviousProblem : (isUncertain ? t.uncertainEvidenceMsg : diagnosisResult.summary)}
-                      </p>
-                    </div>
-                  );
-                })()}
-
-                {/* UNIFIED EVIDENCE SECTION: "WHAT AGRIGUIDE FOUND" */}
-                <div style={{
-                  backgroundColor: '#FFFFFF',
-                  borderRadius: '16px',
-                  border: '1px solid var(--ag-border-default)',
-                  padding: '18px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '14px',
-                  boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
-                }}>
-                  <h4 style={{
-                    fontSize: '13px',
-                    fontWeight: 800,
-                    color: 'var(--ag-color-text-secondary)',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    margin: 0,
-                  }}>
-                    {t.whatAgriGuideFound}
-                  </h4>
-
-                  {/* BLOCK A: What I saw in your photos */}
-                  <div style={{
-                    backgroundColor: 'var(--ag-color-bg-base)',
-                    borderRadius: '12px',
-                    border: '1px solid var(--ag-border-default)',
-                    padding: '14px',
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                      <span style={{ fontSize: '13px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
-                        🌿 A. {t.whatISawInPhotos}
-                      </span>
-                      {analyzedImagesList.length > 0 && (
-                        <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)', fontWeight: 600 }}>
-                          {t.photosAnalyzed}: {analyzedImagesList.length}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Gallery Thumbnails row if > 1 photo */}
-                    {analyzedImagesList.length > 1 && (
-                      <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '6px', marginBottom: '10px' }}>
-                        {analyzedImagesList.map((img, idx) => (
-                          <button
-                            key={idx}
-                            onClick={() => setActiveImageIdx(idx)}
-                            aria-label={`View photo ${idx + 1}`}
-                            style={{
-                              position: 'relative',
-                              width: '64px',
-                              height: '64px',
-                              borderRadius: '8px',
-                              overflow: 'hidden',
-                              border: activeImageIdx === idx ? '2.5px solid var(--ag-color-primary-base)' : '1px solid var(--ag-border-default)',
-                              padding: 0,
-                              cursor: 'pointer',
-                              flexShrink: 0,
-                              backgroundColor: '#000',
-                            }}
-                          >
-                            <img 
-                              src={img.previewUrl} 
-                              alt={`Photo ${idx + 1}`}
-                              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                            />
-                            <span style={{
-                              position: 'absolute',
-                              bottom: '2px',
-                              left: '2px',
-                              backgroundColor: 'rgba(0,0,0,0.65)',
-                              color: '#FFF',
-                              fontSize: '10px',
-                              fontWeight: 700,
-                              padding: '1px 4px',
-                              borderRadius: '3px',
-                            }}>
-                              #{idx + 1}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Main Image with Annotation Overlays */}
-                    {analyzedImagesList[activeImageIdx] && (
-                      <div 
-                        onClick={() => setLightboxImage({ url: analyzedImagesList[activeImageIdx].previewUrl, index: activeImageIdx })}
-                        style={{
-                          position: 'relative',
-                          width: '100%',
-                          backgroundColor: '#0F172A',
-                          borderRadius: '10px',
-                          overflow: 'hidden',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          cursor: 'pointer',
-                          padding: '4px 0',
-                          marginBottom: '10px',
-                        }}
-                      >
-                        <div style={{ position: 'relative', display: 'inline-block', maxWidth: '100%', lineHeight: 0 }}>
-                          <img 
-                            src={analyzedImagesList[activeImageIdx].previewUrl} 
-                            alt={`Crop View ${activeImageIdx + 1}`}
-                            style={{ 
-                              display: 'block',
-                              maxWidth: '100%', 
-                              maxHeight: '280px', 
-                              width: 'auto',
-                              height: 'auto',
-                              objectFit: 'contain',
-                              borderRadius: '6px',
-                            }}
-                          />
-
-                          {/* Annotation Bounding Boxes */}
-                          {currentImageAnnotations.map((ann, aIdx) => (
-                            <div
-                              key={aIdx}
-                              style={{
-                                position: 'absolute',
-                                left: `${ann.x}%`,
-                                top: `${ann.y}%`,
-                                width: `${ann.width}%`,
-                                height: `${ann.height}%`,
-                                border: '2.5px solid #EF4444',
-                                backgroundColor: 'rgba(239, 68, 68, 0.2)',
-                                borderRadius: '4px',
-                                pointerEvents: 'none',
-                                boxShadow: '0 0 0 1.5px rgba(255,255,255,0.9)',
-                                boxSizing: 'border-box',
-                              }}
-                            >
-                              <span style={{
-                                position: 'absolute',
-                                top: ann.y < 16 ? '100%' : '-22px',
-                                left: '0',
-                                backgroundColor: '#DC2626',
-                                color: '#FFFFFF',
-                                fontSize: '10px',
-                                fontWeight: 800,
-                                padding: '1px 6px',
-                                borderRadius: '3px',
-                                whiteSpace: 'nowrap',
-                                lineHeight: '1.2',
-                                zIndex: 2,
-                              }}>
-                                {ann.label}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div style={{
-                          position: 'absolute',
-                          bottom: '6px',
-                          right: '6px',
-                          backgroundColor: 'rgba(0,0,0,0.75)',
-                          color: '#FFFFFF',
-                          borderRadius: '4px',
-                          padding: '3px 6px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '3px',
-                          fontSize: '10px',
-                          fontWeight: 600,
-                          zIndex: 3,
-                        }}>
-                          <Maximize2 size={11} />
-                          <span>{t.tapToEnlarge}</span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Visual Findings List */}
-                    {diagnosisResult.visualFindings && diagnosisResult.visualFindings.length > 0 && (
-                      <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '13px', color: 'var(--ag-color-text-primary)', lineHeight: 1.45 }}>
-                        {diagnosisResult.visualFindings.map((vf, idx) => (
-                          <li key={idx} style={{ marginBottom: '4px' }}>{vf}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-
-                  {/* BLOCK B: What you told AgriGuide (Farmer Voice Quote) */}
-                  {(diagnosisResult.farmerReportedSymptoms.length > 0 || voiceTranscriptText) && (
-                    <div style={{
-                      backgroundColor: '#F8FAFC',
-                      borderRadius: '12px',
-                      border: '1px dashed #CBD5E1',
-                      padding: '12px 14px',
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
-                        <Mic size={14} color="var(--ag-color-primary-base)" />
-                        <span style={{ fontSize: '13px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
-                          🎙️ B. {t.whatYouToldAgriGuide}
-                        </span>
-                      </div>
-
-                      {(() => {
-                        const transcript = voiceTranscriptText || diagnosisResult.farmerReportedSymptoms.join(' ');
-                        const isLong = transcript.length > 120;
-                        const displayText = !isLong || showFullTranscript ? transcript : `${transcript.slice(0, 115)}...`;
-
-                        return (
-                          <div>
-                            <p style={{
-                              margin: 0,
-                              fontStyle: 'italic',
-                              fontSize: '13px',
-                              color: '#334155',
-                              lineHeight: 1.4,
-                            }}>
-                              "{displayText}"
-                            </p>
-                            {isLong && (
-                              <button
-                                onClick={() => setShowFullTranscript(!showFullTranscript)}
-                                style={{
-                                  background: 'none',
-                                  border: 'none',
-                                  color: 'var(--ag-color-primary-base)',
-                                  fontSize: '11px',
-                                  fontWeight: 700,
-                                  cursor: 'pointer',
-                                  padding: '4px 0 0 0',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '3px',
-                                }}
-                              >
-                                {showFullTranscript ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                                <span>{showFullTranscript ? t.hideTranscript : t.showFullTranscript}</span>
-                              </button>
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
-
-                  {/* BLOCK C: Together (Combined Assessment) */}
-                  {diagnosisResult.combinedAssessment && (
-                    <div style={{
-                      backgroundColor: 'var(--ag-color-primary-light)',
-                      borderRadius: '12px',
-                      border: '1px solid #86EFAC',
-                      padding: '12px 14px',
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                        <Sparkles size={14} color="var(--ag-color-primary-dark)" />
-                        <span style={{ fontSize: '13px', fontWeight: 800, color: 'var(--ag-color-primary-dark)' }}>
-                          ⚖️ C. {t.togetherCombined}
-                        </span>
-                      </div>
-                      <p style={{
-                        margin: 0,
-                        fontSize: '13px',
-                        color: '#166534',
-                        lineHeight: 1.45,
-                        fontWeight: 500,
-                      }}>
-                        {diagnosisResult.combinedAssessment}
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                {/* ACTION SECTION: "WHAT YOU SHOULD DO" */}
-                {diagnosisResult.recommendation && diagnosisResult.recommendation.length > 0 && (
-                  <div style={{
-                    backgroundColor: '#FFFFFF',
-                    borderRadius: '16px',
-                    border: '1px solid var(--ag-border-default)',
-                    padding: '18px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '12px',
-                    boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
-                  }}>
-                    <h4 style={{
-                      fontSize: '13px',
-                      fontWeight: 800,
-                      color: 'var(--ag-color-primary-dark)',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.04em',
-                      margin: 0,
-                    }}>
-                      🎯 {t.whatYouShouldDo}
-                    </h4>
-
-                    <ol style={{
-                      margin: 0,
-                      paddingLeft: '20px',
-                      fontSize: '13.5px',
-                      color: 'var(--ag-color-text-primary)',
-                      lineHeight: 1.5,
-                      fontWeight: 600,
-                    }}>
-                      {diagnosisResult.recommendation.map((rec, idx) => (
-                        <li key={idx} style={{ marginBottom: '8px' }}>
-                          <span style={{ fontWeight: 400, color: 'var(--ag-color-text-primary)' }}>{rec}</span>
-                        </li>
-                      ))}
-                    </ol>
-
-                    {/* Things to Avoid */}
-                    {diagnosisResult.whatToAvoid && diagnosisResult.whatToAvoid.length > 0 && (
-                      <div style={{
-                        backgroundColor: '#FFFBEB',
-                        borderRadius: '10px',
-                        border: '1px solid #FDE68A',
-                        padding: '12px 14px',
-                        marginTop: '4px',
-                      }}>
-                        <div style={{ fontSize: '12px', fontWeight: 800, color: '#92400E', textTransform: 'uppercase', marginBottom: '6px' }}>
-                          🚫 {t.thingsToAvoid}
-                        </div>
-                        <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '12.5px', color: '#B45309', lineHeight: 1.4 }}>
-                          {diagnosisResult.whatToAvoid.map((avoid, idx) => (
-                            <li key={idx} style={{ marginBottom: '3px' }}>{avoid}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* MONITORING & ADDITIONAL PHOTO REQUESTS */}
-                {(diagnosisResult.monitoringAdvice || (diagnosisResult.additionalPhotosNeeded && diagnosisResult.additionalPhotosNeeded.length > 0)) && (
-                  <div style={{
-                    backgroundColor: 'var(--ag-color-bg-base)',
-                    borderRadius: '16px',
-                    border: '1px solid var(--ag-border-default)',
-                    padding: '16px 18px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '10px',
-                  }}>
-                    {diagnosisResult.monitoringAdvice && (
-                      <div>
-                        <div style={{ fontSize: '12px', fontWeight: 800, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
-                          🔍 {t.checkAgain}
-                        </div>
-                        <p style={{ margin: 0, fontSize: '13px', color: 'var(--ag-color-text-primary)', lineHeight: 1.45 }}>
-                          {diagnosisResult.monitoringAdvice}
-                        </p>
-                      </div>
-                    )}
-
-                    {diagnosisResult.additionalPhotosNeeded && diagnosisResult.additionalPhotosNeeded.length > 0 && (
-                      <div style={{
-                        backgroundColor: '#FEF2F2',
-                        borderRadius: '10px',
-                        border: '1px solid #FCA5A5',
-                        padding: '12px',
-                        marginTop: '4px',
-                      }}>
-                        <div style={{ fontSize: '12px', fontWeight: 800, color: '#991B1B', marginBottom: '4px' }}>
-                          📷 {t.pleaseCaptureNext}:
-                        </div>
-                        <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '12.5px', color: '#7F1D1D', lineHeight: 1.4 }}>
-                          {diagnosisResult.additionalPhotosNeeded.map((photoReq, idx) => (
-                            <li key={idx} style={{ marginBottom: '2px' }}>{photoReq}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* ACTION BUTTONS: Done & Check Another Crop */}
-                <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
-                  <button
-                    onClick={handleResetModal}
-                    style={{
-                      flex: 1,
-                      minHeight: '48px',
-                      backgroundColor: 'var(--ag-color-primary-base)',
-                      color: '#FFFFFF',
-                      border: 'none',
-                      borderRadius: 'var(--ag-radius-md)',
-                      fontSize: '14px',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      boxShadow: 'var(--ag-shadow-button)',
-                    }}
-                  >
-                    {t.doneBtn}
-                  </button>
-                  <button
-                    onClick={() => {
-                      stopAllSpeech();
-                      selectedImages.forEach(img => revokeTrackedObjectURL(img.previewUrl));
-                      setDiagnosisResult(null);
-                      setSelectedImages([]);
-                      setAnalyzedImagesList([]);
-                      clearVoiceRecording();
-                      setIsHistoricalView(false);
-                      setActiveTab('assess');
-                    }}
-                    style={{
-                      flex: 1,
-                      minHeight: '48px',
-                      backgroundColor: 'var(--ag-color-surface-base)',
-                      color: 'var(--ag-color-text-primary)',
-                      border: '1px solid var(--ag-border-default)',
-                      borderRadius: 'var(--ag-radius-md)',
-                      fontSize: '14px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {t.checkAnotherCropBtn}
-                  </button>
-                </div>
-              </div>
-            ) : isAnalyzing ? (
-              /* Progressive Loading State */
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: '48px 16px',
-                textAlign: 'center',
-              }}>
-                <div style={{
-                  width: '54px',
-                  height: '54px',
-                  borderRadius: '50%',
-                  border: '4px solid var(--ag-color-primary-light)',
-                  borderTopColor: 'var(--ag-color-primary-base)',
-                  animation: 'spin 1s linear infinite',
-                  marginBottom: '20px',
-                }} />
-                <h4 style={{ fontSize: '17px', fontWeight: 800, color: 'var(--ag-color-text-primary)', marginBottom: '8px' }}>
-                  {loadingMessages[loadingStage]}
-                </h4>
-                <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', maxWidth: '360px', lineHeight: 1.4 }}>
-                  Comparing {selectedImages.length} photo(s) with verified crop knowledge and farmer voice description...
-                </p>
-              </div>
-            ) : activeTab === 'assess' ? (
-              /* Input & Upload Form */
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
-                {/* Crop Selector */}
-                <div>
-                  <label style={{ fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', display: 'block', marginBottom: '6px' }}>
-                    Select Crop
-                  </label>
-                  <select
-                    value={selectedCropName}
-                    onChange={(e) => setSelectedCropName(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '12px 14px',
-                      borderRadius: 'var(--ag-radius-md)',
-                      border: '1px solid var(--ag-border-default)',
-                      backgroundColor: 'var(--ag-color-surface-base)',
-                      fontSize: '14px',
-                      fontWeight: 600,
-                      color: 'var(--ag-color-text-primary)',
-                      minHeight: '48px',
-                    }}
-                  >
-                    <option value="Cotton">Cotton (పత్తి / कपास)</option>
-                    <option value="Maize">Maize (మొక్కజొన్న / मक्का)</option>
-                    <option value="Paddy">Paddy (వరి / धान)</option>
-                    <option value="Chilli">Chilli (మిరప / मिर्च)</option>
-                  </select>
-                </div>
-
-                {/* 1. Photo Collection Area */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                    <label style={{ fontSize: '13px', fontWeight: 700, color: 'var(--ag-color-text-primary)' }}>
-                      Crop Photos ({selectedImages.length}/5)
-                    </label>
-                    <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)' }}>
-                      Minimum 1, Maximum 5
-                    </span>
-                  </div>
-
-                  {/* Thumbnail Row */}
-                  <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '8px' }}>
-                    {selectedImages.map((img, idx) => (
-                      <div 
-                        key={idx}
-                        style={{
-                          position: 'relative',
-                          width: '84px',
-                          height: '84px',
-                          borderRadius: '12px',
-                          overflow: 'hidden',
-                          border: '2px solid var(--ag-color-primary-base)',
-                        }}
-                      >
-                        <img 
-                          src={img.previewUrl} 
-                          alt={`Uploaded view ${idx + 1}`}
-                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                        />
-                        <button
-                          onClick={() => handleRemoveImage(idx)}
-                          aria-label={`Remove photo ${idx + 1}`}
-                          style={{
-                            position: 'absolute',
-                            top: '4px',
-                            right: '4px',
-                            backgroundColor: 'rgba(0,0,0,0.65)',
-                            color: '#FFFFFF',
-                            border: 'none',
-                            borderRadius: '50%',
-                            width: '24px',
-                            height: '24px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ))}
-
-                    {/* Add Photo Button */}
-                    {selectedImages.length < 5 && (
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        aria-label="Add another photo"
-                        style={{
-                          width: '84px',
-                          height: '84px',
-                          borderRadius: '12px',
-                          border: '2px dashed var(--ag-border-default)',
-                          backgroundColor: 'var(--ag-color-bg-base)',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: '4px',
-                          cursor: 'pointer',
-                          color: 'var(--ag-color-primary-base)',
-                          fontSize: '11px',
-                          fontWeight: 700,
-                        }}
-                      >
-                        <Plus size={22} />
-                        <span>Add Photo</span>
-                      </button>
-                    )}
-                  </div>
-
-                  <input 
-                    type="file" 
-                    accept="image/*" 
-                    multiple 
-                    ref={fileInputRef} 
-                    style={{ display: 'none' }} 
-                    onChange={handleImageSelect}
-                  />
-
-                  {/* Compact Guidance */}
-                  <div style={{
-                    backgroundColor: 'var(--ag-color-bg-base)',
-                    padding: '10px 14px',
-                    borderRadius: 'var(--ag-radius-md)',
-                    border: '1px solid var(--ag-border-default)',
-                    fontSize: '12px',
-                    color: 'var(--ag-color-text-secondary)',
-                    lineHeight: 1.4,
-                  }}>
-                    <strong style={{ color: 'var(--ag-color-text-primary)' }}>Good photos help AgriGuide understand:</strong>
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
-                      <span style={{ backgroundColor: '#FFFFFF', padding: '2px 8px', borderRadius: '4px', border: '1px solid #E2E8F0' }}>🌿 Whole plant</span>
-                      <span style={{ backgroundColor: '#FFFFFF', padding: '2px 8px', borderRadius: '4px', border: '1px solid #E2E8F0' }}>🔍 Affected area</span>
-                      <span style={{ backgroundColor: '#FFFFFF', padding: '2px 8px', borderRadius: '4px', border: '1px solid #E2E8F0' }}>🍃 Close-up of leaf</span>
-                      <span style={{ backgroundColor: '#FFFFFF', padding: '2px 8px', borderRadius: '4px', border: '1px solid #E2E8F0' }}>🔄 Back of leaf</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. Voice Input Section with Live Transcript */}
-                <div>
-                  <label style={{ fontSize: '13px', fontWeight: 700, color: 'var(--ag-color-text-primary)', display: 'block', marginBottom: '6px' }}>
-                    Tell AgriGuide what you noticed (Voice Description)
-                  </label>
-
-                  <div style={{
-                    border: isRecording ? '1.5px solid var(--ag-color-danger-base)' : '1px solid var(--ag-border-default)',
-                    borderRadius: 'var(--ag-radius-md)',
-                    padding: '14px',
-                    backgroundColor: isRecording ? '#FEF3F2' : 'var(--ag-color-bg-base)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '10px',
-                    transition: 'all 0.2s ease',
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        <button
-                          onClick={isRecording ? stopVoiceRecording : startVoiceRecording}
-                          aria-label={isRecording ? 'Stop recording voice' : 'Start recording voice'}
-                          style={{
-                            width: '48px',
-                            height: '48px',
-                            borderRadius: '50%',
-                            backgroundColor: isRecording ? 'var(--ag-color-danger-base)' : 'var(--ag-color-primary-base)',
-                            color: '#FFFFFF',
-                            border: 'none',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s ease',
-                            flexShrink: 0,
-                          }}
-                        >
-                          {isRecording ? <Square size={18} /> : <Mic size={22} />}
-                        </button>
-
-                        <div>
-                          <div style={{ fontSize: '14px', fontWeight: 800, color: isRecording ? 'var(--ag-color-danger-base)' : 'var(--ag-color-text-primary)' }}>
-                            {isRecording ? '🔴 Listening... Tap to stop' : (recordedAudioBlob ? 'Voice recording ready' : '🎙 Tap to speak (Telugu / Hindi / English)')}
-                          </div>
-                          <div style={{ fontSize: '12px', color: 'var(--ag-color-text-secondary)' }}>
-                            {isRecording ? 'AgriGuide is listening to your words in real time' : (recordedAudioBlob ? 'Spoken description will be transcribed by Whisper' : 'Describe spots, color changes, or weather noticed')}
-                          </div>
-                        </div>
-                      </div>
-
-                      {recordedAudioBlob && !isRecording && (
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          <button
-                            onClick={playRecordedAudio}
-                            aria-label="Play recorded audio"
-                            style={{
-                              background: 'none',
-                              border: '1px solid var(--ag-border-default)',
-                              borderRadius: '6px',
-                              color: 'var(--ag-color-primary-base)',
-                              cursor: 'pointer',
-                              padding: '6px 10px',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '4px',
-                              fontSize: '12px',
-                              fontWeight: 700,
-                              minHeight: '36px',
-                            }}
-                          >
-                            <Play size={14} />
-                            <span>Play</span>
-                          </button>
-
-                          <button
-                            onClick={clearVoiceRecording}
-                            aria-label="Record voice again"
-                            style={{
-                              background: 'none',
-                              border: '1px solid #FECDCA',
-                              borderRadius: '6px',
-                              color: 'var(--ag-color-danger-base)',
-                              cursor: 'pointer',
-                              padding: '6px 10px',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '4px',
-                              fontSize: '12px',
-                              fontWeight: 700,
-                              minHeight: '36px',
-                            }}
-                          >
-                            <RotateCcw size={14} />
-                            <span>Record again</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Live Speech Recognition Box */}
-                    {(isRecording || voiceTranscriptText) && (
-                      <div style={{
-                        backgroundColor: '#FFFFFF',
-                        border: '1px solid var(--ag-border-default)',
-                        borderRadius: '8px',
-                        padding: '10px 12px',
-                        fontSize: '13px',
-                        lineHeight: 1.4,
-                      }}>
-                        <div style={{ fontSize: '11px', fontWeight: 800, color: 'var(--ag-color-primary-base)', marginBottom: '4px', textTransform: 'uppercase' }}>
-                          {getLiveVoiceLabel()}
-                        </div>
-                        <div style={{ color: 'var(--ag-color-text-primary)' }}>
-                          {liveFinalTranscript || voiceTranscriptText ? (
-                            <span>{liveFinalTranscript || voiceTranscriptText}</span>
-                          ) : null}
-                          {liveInterimTranscript && (
-                            <span style={{ color: 'var(--ag-color-text-secondary)', fontStyle: 'italic', marginLeft: '4px' }}>
-                              {liveInterimTranscript}...
-                            </span>
-                          )}
-                          {!liveFinalTranscript && !liveInterimTranscript && !voiceTranscriptText && (
-                            <span style={{ color: 'var(--ag-color-text-secondary)', fontStyle: 'italic' }}>
-                              Speak now...
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {recordedAudioUrl && (
-                      <audio ref={audioPlayerRef} src={recordedAudioUrl} style={{ display: 'none' }} />
-                    )}
-                  </div>
-                </div>
-
-                {/* 3-Way Crop Mismatch Error on Upload Page */}
-                {mismatchError && (
-                  <div style={{
-                    backgroundColor: '#FEF3F2',
-                    border: '1.5px solid #FECDCA',
-                    borderRadius: 'var(--ag-radius-md)',
-                    padding: '16px',
-                    boxShadow: '0 2px 8px rgba(239, 68, 68, 0.08)',
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <AlertOctagon size={20} color="var(--ag-color-danger-base)" />
-                        <span style={{ fontSize: '13px', fontWeight: 800, color: 'var(--ag-color-danger-base)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
-                          ⚠️ {currentLang === 'te' ? 'పంట వివరాలలో తేడా ఉంది — దయచేసి సరిచూసుకోండి' : (currentLang === 'hi' ? 'फसल विवरण में बेमेल है — कृपया जांचें' : 'Crop Input Mismatch — Please Recheck')}
-                        </span>
-                      </div>
-
-                      {mismatchError.notice && (
-                        <button
-                          onClick={() => handleSpeakText('mismatchError', mismatchError.notice)}
-                          aria-label="Listen to mismatch notice"
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            color: 'var(--ag-color-danger-base)',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '4px',
-                            fontSize: '12px',
-                            fontWeight: 700,
-                            minHeight: '36px',
-                            padding: '4px 8px',
-                          }}
-                        >
-                          {speakingSection === 'mismatchError' ? <Square size={14} /> : <Volume2 size={16} />}
-                          <span>{speakingSection === 'mismatchError' ? 'Stop' : 'Listen'}</span>
-                        </button>
-                      )}
-                    </div>
-
-                    {/* 3-Modality Comparison Badges */}
-                    <div style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
-                      gap: '8px',
-                      marginBottom: '10px',
-                      backgroundColor: '#FFFFFF',
-                      padding: '10px',
-                      borderRadius: '8px',
-                      border: '1px solid #FECDCA',
-                    }}>
-                      <div style={{ fontSize: '12px', color: '#7F1D1D' }}>
-                        <strong style={{ display: 'block', color: '#991B1B', fontSize: '11px', textTransform: 'uppercase' }}>
-                          {currentLang === 'te' ? 'ఎంచుకున్న పంట:' : (currentLang === 'hi' ? 'चुनी गई फसल:' : 'Selected Crop:')}
-                        </strong>
-                        <span style={{ fontWeight: 700 }}>{mismatchError.selectedCrop}</span>
-                      </div>
-                      <div style={{ fontSize: '12px', color: '#7F1D1D' }}>
-                        <strong style={{ display: 'block', color: '#991B1B', fontSize: '11px', textTransform: 'uppercase' }}>
-                          {currentLang === 'te' ? 'ఫోటోలో కనిపించేది:' : (currentLang === 'hi' ? 'फोटो में पहचान:' : 'Photo Identified:')}
-                        </strong>
-                        <span style={{ fontWeight: 700 }}>{mismatchError.visualCrop}</span>
-                      </div>
-                      <div style={{ fontSize: '12px', color: '#7F1D1D' }}>
-                        <strong style={{ display: 'block', color: '#991B1B', fontSize: '11px', textTransform: 'uppercase' }}>
-                          {currentLang === 'te' ? 'వాయిస్‌లో మాట్లాడింది:' : (currentLang === 'hi' ? 'आवाज में बताया गया:' : 'Voice Mentioned:')}
-                        </strong>
-                        <span style={{ fontWeight: 700 }}>{mismatchError.voiceCrop || (currentLang === 'te' ? 'ఏమీ చెప్పలేదు' : 'None')}</span>
-                      </div>
-                    </div>
-
-                    <p style={{ margin: 0, fontSize: '13px', color: '#991B1B', lineHeight: 1.45, fontWeight: 500 }}>
-                      {mismatchError.notice}
-                    </p>
-                  </div>
-                )}
-
-                {/* Error Banner if any */}
-                {errorMessage && (
-                  <div style={{
-                    backgroundColor: '#FEF3F2',
-                    border: '1px solid #FECDCA',
-                    borderRadius: 'var(--ag-radius-md)',
-                    padding: '10px 14px',
-                    fontSize: '13px',
-                    color: '#B42318',
-                  }}>
-                    {errorMessage}
-                  </div>
-                )}
-
-                {/* Submit Assessment Button */}
-                <button
-                  onClick={handleRunAnalysis}
-                  disabled={selectedImages.length === 0}
-                  style={{
-                    width: '100%',
-                    minHeight: '52px',
-                    backgroundColor: selectedImages.length > 0 
-                      ? (mismatchError ? '#B42318' : 'var(--ag-color-primary-base)') 
-                      : '#94A3B8',
-                    color: '#FFFFFF',
-                    border: 'none',
-                    borderRadius: 'var(--ag-radius-md)',
-                    fontSize: '15px',
-                    fontWeight: 800,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '8px',
-                    cursor: selectedImages.length > 0 ? 'pointer' : 'not-allowed',
-                    boxShadow: 'var(--ag-shadow-button)',
-                  }}
-                >
-                  <Sparkles size={18} />
-                  <span>
-                    {mismatchError 
-                      ? (currentLang === 'te' ? 'సరిచూసి మళ్లీ విశ్లేషించండి (Recheck & Analyze)' : (currentLang === 'hi' ? 'पुनः जांचें और विश्लेषण करें' : 'Recheck & Re-analyze Crop'))
-                      : `Analyze Crop (${selectedImages.length} Photos ${recordedAudioBlob ? '+ Voice' : ''})`}
-                  </span>
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* FULLSCREEN LIGHTBOX FOR ANALYZED CROP PHOTO                               */}
+      {/* 4. FULLSCREEN LIGHTBOX FOR ENLARGED PHOTO WITH ANNOTATIONS                */}
       {/* ========================================================================= */}
       {lightboxImage && (
         <div 
@@ -2125,18 +2507,17 @@ export const CropHealthCard: React.FC<CropHealthCardProps> = ({
               <img 
                 src={lightboxImage.url} 
                 alt={`Crop Photo Full View ${lightboxImage.index + 1}`}
-                style={{
+                style={{ 
                   display: 'block',
-                  maxWidth: '90vw',
-                  maxHeight: '82vh',
-                  width: 'auto',
+                  maxWidth: '90vw', 
+                  maxHeight: '82vh', 
+                  width: 'auto', 
                   height: 'auto',
                   objectFit: 'contain',
                   borderRadius: '8px',
                 }}
               />
 
-              {/* Accurately positioned visual annotations in fullscreen lightbox */}
               {diagnosisResult?.visualAnnotations?.filter(a => a.imageIndex === lightboxImage.index).map((ann, aIdx) => (
                 <div
                   key={aIdx}

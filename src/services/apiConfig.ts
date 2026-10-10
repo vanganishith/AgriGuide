@@ -15,6 +15,25 @@ export async function fetchApi<T>(
   if (!headers.has('Accept')) {
     headers.set('Accept', 'application/json');
   }
+  if (options.body && typeof options.body === 'string' && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  // Attach authoritative farmer session headers if farmer has confirmed mobile
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const savedProfileStr = localStorage.getItem('agriguide_farmer_profile') || localStorage.getItem('ag_active_farmer_profile');
+      if (savedProfileStr) {
+        const profile = JSON.parse(savedProfileStr);
+        if (profile?.id && !headers.has('x-farmer-id')) {
+          headers.set('x-farmer-id', profile.id);
+        }
+        if (profile?.phone && !headers.has('x-farmer-phone')) {
+          headers.set('x-farmer-phone', profile.phone);
+        }
+      }
+    } catch (_) {}
+  }
 
   const response = await fetch(url, {
     ...options,

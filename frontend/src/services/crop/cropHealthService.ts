@@ -1,4 +1,4 @@
-import type { CropHealth, CropDoctorDiagnosis, Language } from '../../types';
+import type { CropHealth, CropDoctorDiagnosis, CropInvestigatorQuestion, CropInvestigationTurn, Language } from '../../types';
 import { CacheService } from '../cacheService';
 import { fetchApi } from '../apiConfig';
 
@@ -33,9 +33,33 @@ export const SEED_CROP_RECORDS: CropHealth[] = [
 ];
 
 export interface MultimodalDiagnosisResult {
-  status: 'success' | 'unconfigured' | 'error';
+  status: 'success' | 'unconfigured' | 'error' | 'mismatch';
   diagnosis?: CropDoctorDiagnosis;
+  cropMismatchDetected?: boolean;
+  selectedCrop?: string;
+  visualCropIdentified?: string;
+  voiceCropMentioned?: string | null;
+  mismatchNotice?: string | null;
   voiceStatus?: string;
+  whisperLatencyMs?: number;
+  aiLatencyMs?: number;
+  message?: string;
+}
+
+export interface CropInvestigateResult {
+  status: 'success' | 'mismatch' | 'insufficient_image' | 'needs_farmer_input' | 'ready_for_diagnosis' | 'error';
+  state: 'needs_farmer_input' | 'ready_for_diagnosis' | 'mismatch' | 'insufficient_image';
+  cropMismatchDetected?: boolean;
+  selectedCrop?: string;
+  visualCropIdentified?: string | null;
+  voiceCropMentioned?: string | null;
+  mismatchNotice?: string | null;
+  explanation?: string | null;
+  additionalPhotosNeeded?: string[];
+  questions?: CropInvestigatorQuestion[];
+  question?: CropInvestigatorQuestion | null;
+  questionsAskedCount?: number;
+  voiceTranscript?: string | null;
   whisperLatencyMs?: number;
   aiLatencyMs?: number;
   message?: string;
@@ -46,12 +70,12 @@ export const CropHealthService = {
     // 1. Call Node Backend /api/crop/observations
     try {
       const res = await fetchApi<any[]>('/crop/observations');
-      if (res.success && res.data && res.data.length > 0) {
+      if (res.success && Array.isArray(res.data)) {
         const mapped: CropHealth[] = res.data.map(item => ({
           id: item.id || `plot_${Date.now()}`,
           cropName: item.crop_name || 'Crop',
           variety: item.variety || 'Standard',
-          acres: Number(item.acres || 3.0),
+          acres: Number(item.acres || 1.0),
           status: item.status || 'healthy',
           lastInspectionDate: item.observed_at ? new Date(item.observed_at).toLocaleDateString() : 'Recent',
           recommendedAction: item.notes || 'Routine field scouting.',
@@ -68,21 +92,19 @@ export const CropHealthService = {
 
     // 2. Cache check
     const cached = CacheService.get<CropHealth[]>(CROP_HEALTH_CACHE_KEY);
-    if (cached && cached.data.length > 0) {
+    if (cached && Array.isArray(cached.data)) {
       return cached.data;
     }
 
-    // 3. Seed plots
-    CacheService.set(CROP_HEALTH_CACHE_KEY, SEED_CROP_RECORDS);
-    return SEED_CROP_RECORDS;
+    return [];
   },
 
   getCropHealthRecordsSync(): CropHealth[] {
     const cached = CacheService.get<CropHealth[]>(CROP_HEALTH_CACHE_KEY);
-    if (cached && cached.data.length > 0) {
+    if (cached && Array.isArray(cached.data)) {
       return cached.data;
     }
-    return SEED_CROP_RECORDS;
+    return [];
   },
 
   updateCropRecord(updated: CropHealth): void {
@@ -97,15 +119,15 @@ export const CropHealthService = {
   },
 
   /**
-   * Unified Multimodal Crop Doctor Assessment
-   * Orchestrates 1-5 images + optional voice audio + crop context
+   * Stage 1: AI Investigator Request
    */
-  async diagnoseCropMultimodal({
+  async investigateCrop({
     images,
     audioBlob,
     voiceText,
     cropName = 'Cotton',
     language = 'en',
+    conversationHistory = [],
     farmerContext,
   }: {
     images: File[];
@@ -113,6 +135,84 @@ export const CropHealthService = {
     voiceText?: string | null;
     cropName?: string;
     language?: Language;
+    conversationHistory?: CropInvestigationTurn[];
+    farmerContext?: any;
+  }): Promise<CropInvestigateResult> {
+    if (!images || images.length === 0) {
+      return {
+        status: 'error',
+        state: 'ready_for_diagnosis',
+        message: 'Please upload at least one crop leaf or plant photo.',
+      };
+    }
+
+    try {
+      const formData = new FormData();
+      images.slice(0, 5).forEach((img, index) => {
+        formData.append('images', img, img.name || `leaf_${index + 1}.jpg`);
+      });
+
+      if (audioBlob) {
+        formData.append('audio', audioBlob, 'farmer_voice.webm');
+      }
+      if (voiceText && voiceText.trim().length > 0) {
+        formData.append('voiceDescription', voiceText.trim());
+      }
+      formData.append('cropName', cropName);
+      formData.append('language', language);
+      if (conversationHistory && conversationHistory.length > 0) {
+        formData.append('conversationHistory', JSON.stringify(conversationHistory));
+      }
+      if (farmerContext) {
+        formData.append('farmerContext', JSON.stringify(farmerContext));
+      }
+
+      const res = await fetchApi<CropInvestigateResult>('/crop/investigate', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (res.success && res.data) {
+        return {
+          ...res.data,
+          status: 'success',
+        };
+      }
+
+      return {
+        status: 'error',
+        state: 'ready_for_diagnosis',
+        message: res.data?.message || 'Investigation unavailable.',
+      };
+    } catch (e: any) {
+      console.warn('[CropHealthService] Investigation error:', e);
+      return {
+        status: 'error',
+        state: 'ready_for_diagnosis',
+        message: e.message || 'Investigation error.',
+      };
+    }
+  },
+
+  /**
+   * Stage 2: Unified Multimodal Crop Doctor Assessment
+   * Orchestrates 1-5 images + consultation Q&A + voice audio + crop context
+   */
+  async diagnoseCropMultimodal({
+    images,
+    audioBlob,
+    voiceText,
+    cropName = 'Cotton',
+    language = 'en',
+    consultationQnA = [],
+    farmerContext,
+  }: {
+    images: File[];
+    audioBlob?: Blob | null;
+    voiceText?: string | null;
+    cropName?: string;
+    language?: Language;
+    consultationQnA?: CropInvestigationTurn[];
     farmerContext?: any;
   }): Promise<MultimodalDiagnosisResult> {
     if (!images || images.length === 0) {
@@ -142,12 +242,20 @@ export const CropHealthService = {
 
       formData.append('cropName', cropName);
       formData.append('language', language);
+      if (consultationQnA && consultationQnA.length > 0) {
+        formData.append('consultationQnA', JSON.stringify(consultationQnA));
+      }
       if (farmerContext) {
         formData.append('farmerContext', JSON.stringify(farmerContext));
       }
 
       const res = await fetchApi<{
         status: string;
+        cropMismatchDetected?: boolean;
+        selectedCrop?: string;
+        visualCropIdentified?: string;
+        voiceCropMentioned?: string | null;
+        mismatchNotice?: string | null;
         diagnosis?: CropDoctorDiagnosis;
         voiceStatus?: string;
         whisperLatencyMs?: number;
@@ -158,21 +266,36 @@ export const CropHealthService = {
         body: formData,
       });
 
-      if (res.success && res.data && res.data.diagnosis) {
-        return {
-          status: 'success',
-          diagnosis: res.data.diagnosis,
-          voiceStatus: res.data.voiceStatus,
-          whisperLatencyMs: res.data.whisperLatencyMs,
-          aiLatencyMs: res.data.aiLatencyMs,
-          message: 'Multimodal crop assessment completed.',
-        };
-      } else {
-        return {
-          status: 'unconfigured',
-          message: res.data?.message || 'Crop Doctor analysis is temporarily unavailable.',
-        };
+      if (res.success && res.data) {
+        if (res.data.status === 'mismatch' || res.data.cropMismatchDetected || res.data.diagnosis?.cropMismatchDetected) {
+          return {
+            status: 'mismatch',
+            cropMismatchDetected: true,
+            selectedCrop: res.data.selectedCrop || res.data.diagnosis?.selectedCrop,
+            visualCropIdentified: res.data.visualCropIdentified || res.data.diagnosis?.visualCropIdentified,
+            voiceCropMentioned: res.data.voiceCropMentioned || res.data.diagnosis?.voiceCropMentioned,
+            mismatchNotice: res.data.mismatchNotice || res.data.diagnosis?.mismatchNotice || res.data.message,
+            diagnosis: res.data.diagnosis,
+            message: res.data.message || res.data.mismatchNotice || 'Crop mismatch detected.',
+          };
+        }
+
+        if (res.data.diagnosis) {
+          return {
+            status: 'success',
+            diagnosis: res.data.diagnosis,
+            voiceStatus: res.data.voiceStatus,
+            whisperLatencyMs: res.data.whisperLatencyMs,
+            aiLatencyMs: res.data.aiLatencyMs,
+            message: 'Multimodal crop assessment completed.',
+          };
+        }
       }
+
+      return {
+        status: 'unconfigured',
+        message: res.data?.message || 'Crop Doctor analysis is temporarily unavailable.',
+      };
     } catch (err: any) {
       return {
         status: 'error',
@@ -183,7 +306,7 @@ export const CropHealthService = {
 
   // Backwards compatibility single image wrapper
   async diagnoseCropImage(file: File, cropName: string = 'Cotton'): Promise<{
-    status: 'success' | 'unconfigured' | 'error';
+    status: 'success' | 'unconfigured' | 'error' | 'mismatch';
     diagnosis?: CropHealth;
     message: string;
   }> {
@@ -206,7 +329,7 @@ export const CropHealthService = {
           recommendedAction: res.diagnosis.recommendation.join(' '),
           urgency: res.diagnosis.severity === 'high' ? 'high' : 'medium',
           updatedAt: new Date().toISOString(),
-          source: `Fireworks GLM-5.3-Flash`,
+          source: 'AgriGuide Diagnostic Protocol',
         },
         message: res.diagnosis.summary,
       };
@@ -216,5 +339,66 @@ export const CropHealthService = {
       status: res.status,
       message: res.message || 'Crop analysis unavailable.',
     };
+  },
+
+  /**
+   * Fetch historical crop doctor assessments from Supabase
+   */
+  async getDiagnosisHistory(): Promise<CropDiagnosisHistoryItem[]> {
+    try {
+      const res = await fetchApi<CropDiagnosisHistoryItem[]>('/crop/diagnoses');
+      if (res.success && Array.isArray(res.data)) {
+        return res.data;
+      }
+      return [];
+    } catch (err) {
+      console.warn('[CropHealthService] Error loading history:', err);
+      return [];
+    }
+  },
+
+  /**
+   * Reconstruct a single historical diagnosis from Supabase
+   */
+  async getDiagnosisById(id: string): Promise<{
+    diagnosis: CropDoctorDiagnosis;
+    images: Array<{ imageIndex: number; storagePath: string; previewUrl: string; name?: string }>;
+    audioUrl?: string | null;
+    createdAt?: string;
+  } | null> {
+    try {
+      const res = await fetchApi<{
+        diagnosis: CropDoctorDiagnosis;
+        images: Array<{ imageIndex: number; storagePath: string; previewUrl: string; name?: string }>;
+        audioUrl?: string | null;
+        createdAt?: string;
+      }>(`/crop/diagnoses/${id}`);
+      if (res.success && res.data) {
+        return res.data;
+      }
+      return null;
+    } catch (err) {
+      console.warn('[CropHealthService] Error loading diagnosis by ID:', err);
+      return null;
+    }
   }
 };
+
+export interface CropDiagnosisHistoryItem {
+  id: string;
+  cropName: string;
+  status: 'no_issue' | 'problem_detected' | 'uncertain';
+  diagnosisTitle: string;
+  summary?: string;
+  severity: 'none' | 'low' | 'moderate' | 'high' | 'unknown';
+  imageCount: number;
+  voiceContextUsed: boolean;
+  voiceTranscript?: string | null;
+  createdAt: string;
+  thumbnailSignedUrl?: string | null;
+  signedImages?: Array<{
+    imageIndex: number;
+    storagePath: string;
+    previewUrl: string;
+  }>;
+}

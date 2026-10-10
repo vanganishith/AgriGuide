@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import type { Language, LocationContext } from '../../types';
 import { translations } from '../../i18n/translations';
-import { AGRICULTURAL_DISTRICTS } from '../../services/location/locationService';
-import { MapPin, WifiOff, Check, ChevronDown } from 'lucide-react';
+import { localizeLocation } from '../../i18n/agriLocalization';
+import { MapPin, WifiOff, ChevronDown, User } from 'lucide-react';
+import { LocationPickerModal } from '../location/LocationPickerModal';
 
 interface TopBarProps {
   currentLang: Language;
@@ -10,6 +11,9 @@ interface TopBarProps {
   location: LocationContext;
   onLocationChange: (loc: LocationContext) => void;
   isOffline: boolean;
+  onNavigateHome?: () => void;
+  farmerProfile?: { phone?: string; fullName?: string } | null;
+  onOpenLogin?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -18,9 +22,12 @@ export const TopBar: React.FC<TopBarProps> = ({
   location,
   onLocationChange,
   isOffline,
+  onNavigateHome,
+  farmerProfile,
+  onOpenLogin,
 }) => {
   const t = translations[currentLang];
-  const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [showLocationModal, setShowLocationModal] = useState(false);
 
   return (
     <header style={{
@@ -43,7 +50,11 @@ export const TopBar: React.FC<TopBarProps> = ({
         marginBottom: '6px',
         minWidth: 0,
       }}>
-        <div style={{ minWidth: 0, flex: 1 }}>
+        <div 
+          onClick={onNavigateHome}
+          role={onNavigateHome ? 'button' : undefined}
+          style={{ minWidth: 0, flex: 1, cursor: onNavigateHome ? 'pointer' : 'default' }}
+        >
           <h1 style={{
             fontSize: '18px',
             fontWeight: 800,
@@ -54,7 +65,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
           }}>
-            {t.greeting}
+            {farmerProfile?.fullName 
+              ? (currentLang === 'te' ? `నమస్కారం, ${farmerProfile.fullName} గారు` : currentLang === 'hi' ? `नमस्ते, ${farmerProfile.fullName} जी` : `Namaste, ${farmerProfile.fullName}`)
+              : t.greeting}
           </h1>
           <p style={{
             fontSize: '12px',
@@ -65,46 +78,70 @@ export const TopBar: React.FC<TopBarProps> = ({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
           }}>
-            {t.farmSummary}
+            {farmerProfile?.phone ? `+91 ${farmerProfile.phone}` : t.farmSummary}
           </p>
         </div>
 
-        {/* Language Selector Pill */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          backgroundColor: 'var(--ag-color-bg-base)',
-          borderRadius: 'var(--ag-radius-full)',
-          padding: '2px',
-          border: '1px solid var(--ag-border-default)',
-          flexShrink: 0,
-        }}>
-          {(['en', 'te', 'hi'] as Language[]).map((lang) => {
-            const isActive = currentLang === lang;
-            const labels = { en: 'EN', te: 'తె', hi: 'हि' };
-            return (
-              <button
-                key={lang}
-                onClick={() => onLanguageChange(lang)}
-                aria-label={`Switch language to ${lang}`}
-                style={{
-                  padding: '4px 8px',
-                  minHeight: '30px',
-                  minWidth: '32px',
-                  fontSize: '12px',
-                  fontWeight: isActive ? 700 : 500,
-                  backgroundColor: isActive ? 'var(--ag-color-primary-base)' : 'transparent',
-                  color: isActive ? '#FFFFFF' : 'var(--ag-color-text-secondary)',
-                  border: 'none',
-                  borderRadius: 'var(--ag-radius-full)',
-                  cursor: 'pointer',
-                  transition: 'all 0.15s ease',
-                }}
-              >
-                {labels[lang]}
-              </button>
-            );
-          })}
+        {/* Language & Profile Row */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+          {/* Language Selector Pill */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            backgroundColor: 'var(--ag-color-bg-base)',
+            borderRadius: 'var(--ag-radius-full)',
+            padding: '2px',
+            border: '1px solid var(--ag-border-default)',
+            flexShrink: 0,
+          }}>
+            {(['en', 'te', 'hi'] as Language[]).map((lang) => {
+              const isActive = currentLang === lang;
+              const labels = { en: 'EN', te: 'తె', hi: 'హి' };
+              return (
+                <button
+                  key={lang}
+                  onClick={() => onLanguageChange(lang)}
+                  aria-label={`Switch language to ${lang}`}
+                  style={{
+                    padding: '4px 7px',
+                    minHeight: '28px',
+                    minWidth: '28px',
+                    fontSize: '11px',
+                    fontWeight: isActive ? 700 : 500,
+                    backgroundColor: isActive ? 'var(--ag-color-primary-base)' : 'transparent',
+                    color: isActive ? '#FFFFFF' : 'var(--ag-color-text-secondary)',
+                    border: 'none',
+                    borderRadius: 'var(--ag-radius-full)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {labels[lang]}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Profile / Phone identification trigger */}
+          <button
+            onClick={onOpenLogin}
+            aria-label="Farmer profile identification"
+            style={{
+              width: '32px',
+              height: '32px',
+              borderRadius: 'var(--ag-radius-full)',
+              backgroundColor: 'var(--ag-color-bg-base)',
+              border: '1px solid var(--ag-border-default)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--ag-color-primary-base)',
+              cursor: onOpenLogin ? 'pointer' : 'default',
+              padding: 0,
+            }}
+          >
+            <User size={15} />
+          </button>
         </div>
       </div>
 
@@ -118,9 +155,9 @@ export const TopBar: React.FC<TopBarProps> = ({
         gap: '8px',
         minWidth: 0,
       }}>
-        {/* Location Dropdown Trigger */}
+        {/* Location Dropdown Trigger -> Opens OpenStreetMap Location Picker */}
         <button
-          onClick={() => setShowLocationPicker(!showLocationPicker)}
+          onClick={() => setShowLocationModal(true)}
           style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -128,7 +165,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             background: 'none',
             border: 'none',
             color: 'var(--ag-color-primary-dark)',
-            fontWeight: 600,
+            fontWeight: 700,
             cursor: 'pointer',
             padding: '2px 0',
             fontSize: '12px',
@@ -141,9 +178,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-            maxWidth: '180px',
+            maxWidth: '220px',
           }}>
-            {location.district}, {location.state}
+            {localizeLocation(location.district, location.state, currentLang, location.village)}
           </span>
           <ChevronDown size={12} style={{ flexShrink: 0 }} />
         </button>
@@ -168,51 +205,14 @@ export const TopBar: React.FC<TopBarProps> = ({
         )}
       </div>
 
-      {/* District Selector Modal / Dropdown */}
-      {showLocationPicker && (
-        <div style={{
-          marginTop: '10px',
-          padding: '12px',
-          backgroundColor: 'var(--ag-color-bg-base)',
-          borderRadius: 'var(--ag-radius-md)',
-          border: '1px solid var(--ag-border-default)',
-        }}>
-          <p style={{ fontSize: '12px', fontWeight: 600, color: 'var(--ag-color-text-secondary)', marginBottom: '8px' }}>
-            Select Agricultural District:
-          </p>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-            {AGRICULTURAL_DISTRICTS.map((d) => {
-              const isSelected = d.district === location.district;
-              return (
-                <button
-                  key={d.district}
-                  onClick={() => {
-                    onLocationChange(d);
-                    setShowLocationPicker(false);
-                  }}
-                  style={{
-                    padding: '8px 10px',
-                    fontSize: '12px',
-                    textAlign: 'left',
-                    borderRadius: 'var(--ag-radius-sm)',
-                    border: isSelected ? '1px solid var(--ag-color-primary-base)' : '1px solid var(--ag-border-default)',
-                    backgroundColor: isSelected ? 'var(--ag-color-primary-light)' : '#FFFFFF',
-                    color: isSelected ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-primary)',
-                    fontWeight: isSelected ? 700 : 500,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                  }}
-                >
-                  <span>{d.district}</span>
-                  {isSelected && <Check size={12} color="var(--ag-color-primary-base)" />}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* Interactive OpenStreetMap + Leaflet Location Picker Modal */}
+      <LocationPickerModal
+        isOpen={showLocationModal}
+        onClose={() => setShowLocationModal(false)}
+        currentLocation={location}
+        onLocationSelected={onLocationChange}
+        currentLang={currentLang}
+      />
     </header>
   );
 };

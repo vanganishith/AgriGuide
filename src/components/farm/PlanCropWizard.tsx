@@ -19,10 +19,305 @@ import {
   ArrowLeft, 
   Check, 
   AlertTriangle, 
+  AlertCircle,
   Mic, 
   Square, 
-  Volume2 
+  Volume2,
+  MapPin
 } from 'lucide-react';
+import { LocationPickerModal } from '../location/LocationPickerModal';
+import { getTodayISTDateString } from '../../utils/istDateUtils';
+import { 
+  localizeCropName, 
+  localizeSoil, 
+  localizeIrrigation, 
+  localizeLocation 
+} from '../../i18n/agriLocalization';
+
+const WIZARD_STRINGS = {
+  step: { en: 'Step', te: 'స్టెప్', hi: 'चरण' },
+  of: { en: 'of', te: '/', hi: 'का' },
+  steps: {
+    1: { en: 'Farm Context', te: 'పొలం వివరాలు', hi: 'खेत का विवरण' },
+    2: { en: 'Field Parameters', te: 'చేను & నీటి వనరులు', hi: 'खेत और सिंचाई पैरामीटर' },
+    3: { en: 'Crop Comparison', te: 'పంటల పోలిక', hi: 'फसल तुलना' },
+    4: { en: 'Production Plan', te: 'ఉత్పత్తి ప్రణాళిక', hi: 'उत्पादක योजना' },
+  },
+  titles: {
+    2: { en: 'Field & Irrigation Information', te: 'చేను & సాగునీటి వివరాలు', hi: 'खेत और सिंचाई की जानकारी' },
+  },
+  step1: {
+    selectExistingOrNew: {
+      en: 'Select Existing Farm or Describe New',
+      te: 'ఉన్న పొలాన్ని ఎంచుకోండి లేదా కొత్తది వివరించండి',
+      hi: 'मौजूदा खेत चुनें या नया विवरण दें',
+    },
+    describeNewFarm: {
+      en: '+ Describe New Farm',
+      te: '+ కొత్త పొలం నమోదు చేయండి',
+      hi: '+ नया खेत जोड़ें',
+    },
+    farmName: { en: 'Farm Name', te: 'పొలం పేరు', hi: 'खेत का नाम' },
+    totalFarmAcres: { en: 'Total Farm Acres', te: 'మొత్తం పొలం విస్తీర్ణం (ఎకరాలు)', hi: 'कुल खेत का रकबा (एकड़)' },
+    location: { en: 'Location', te: 'ప్రాంతం', hi: 'स्थान' },
+    pinOnMap: { en: '📍 Pin on Map / GPS', te: '📍 మ్యాప్‌లో గుర్తించండి / GPS', hi: '📍 मैप पर चुनें / GPS' },
+    district: { en: 'District', te: 'జిల్లా', hi: 'जिला' },
+    villageMandal: { en: 'Village / Mandal', te: 'గ్రామం / మండలం', hi: 'गांव / मंडल' },
+    villagePlaceholder: { en: 'e.g. Geesugonda', te: 'ఉదా: గీసుకొండ', hi: 'उदा. गीसुगोंडा' },
+    continueToField: { en: 'Continue to Field Info', te: 'చేను వివరాలకు కొనసాగండి', hi: 'खेत की जानकारी पर जाएं' },
+    acresAvailable: { en: 'Available', te: 'అందుబాటులో ఉంది', hi: 'उपलब्ध' },
+    acres: { en: 'Acres', te: 'ఎకరాలు', hi: 'एकड़' },
+  },
+  step2: {
+    voicePrompt: {
+      en: '🎙 "My field is red loamy soil, borewell drip irrigation, planning 2 acres."',
+      te: '🎙 "నా చేను ఎర్ర నేల, బోరుబావి డ్రిప్ ఇరిగేషన్, 2 ఎకరాలు ప్లాన్ చేస్తున్నాను."',
+      hi: '🎙 "मेरा खेत लाल दोमट मिट्टी है, बोरवेल ड्रिप सिंचाई, 2 एकड़ की योजना है। आदि बोलें"',
+    },
+    speakFieldDetails: { en: '🎙 Speak Field Details', te: '🎙 చేను వివరాలు మాట్లాడండి', hi: '🎙 खेत का विवरण बोलें' },
+    listening: { en: 'Listening... Tap to stop', te: 'వింటున్నాము... ఆపడానికి నొక్కండి', hi: 'सुन रहे हैं... रोकने के लिए टैप करें' },
+    youSaid: { en: 'YOU SAID:', te: 'మీరు చెప్పినది:', hi: 'आपने कहा:' },
+    acresPlanned: { en: 'Acres Planned for this Crop', te: 'ఈ పంట కోసం ప్లాన్ చేసిన ఎకరాలు', hi: 'इस फसल के लिए नियोजित एकड़' },
+    acresUnallocated: { en: 'acres unallocated on', te: 'ఎకరాలు కేటాయించలేదు:', hi: 'एकड़ असंबद्ध हैं:' },
+    soilType: { en: 'Soil Type', te: 'నేల రకం', hi: 'मिट्टी का प्रकार' },
+    irrigationSource: { en: 'Irrigation Source', te: 'సాగునీటి వనరు', hi: 'सिंचाई का साधन' },
+    plantingSeason: { en: 'Planting Season / Window', te: 'విత్తే కాలం / సీజన్', hi: 'बुवाई का मौसम / समय' },
+    listen: { en: 'Listen', te: 'వినండి', hi: 'सुनें' },
+    back: { en: 'Back', te: 'వెనుకకు', hi: 'पीछे जाएं' },
+    whatCanIGrow: { en: 'What Can I Grow Here?', te: 'నేను ఇక్కడ ఏ పంటను సాగు చేయగలను?', hi: 'मैं यहाँ क्या उगा सकता हूँ?' },
+  },
+  step3: {
+    analyzingTitle: {
+      en: 'Analyzing Verified Agronomic Data & Economics...',
+      te: 'ధృవీకరించిన వ్యవసాయ సమాచారం & మార్కెట్ ధరలను విశ్లేషిస్తున్నాము...',
+      hi: 'सत्यापित कृषि डेटा और बाजार अर्थशास्त्र का विश्लेषण किया जा रहा है...',
+    },
+    analyzingSubtitle: {
+      en: 'Grounding comparison in live weather, APMC Mandi price baselines, and ICAR benchmarks.',
+      te: 'తాజా స్థానిక వాతావరణం, APMC మార్కెట్ ధరలు మరియు ICAR కొలమానాలతో పోలుస్తున్నాము.',
+      hi: 'स्थानीय मौसम, APMC मंडी भाव और ICAR मानकों के आधार पर तुलना की जा रही है।',
+    },
+    agronomicAssessment: { en: 'Agronomic Assessment', te: 'వ్యవసాయ నిపుణుల అంచనా', hi: 'कृषि विशेषज्ञ मूल्यांकन' },
+    listen: { en: 'Listen', te: 'వినండి', hi: 'सुनें' },
+    stop: { en: 'Stop', te: 'ఆపండి', hi: 'रोकें' },
+    askAgriGuideTitle: { en: '🎙 Ask AgriGuide about these crops', te: '🎙 ఈ పంటల గురించి అగ్రిగైడ్‌ను అడగండి', hi: '🎙 इन फसलों के बारे में एग्रीगाइड से पूछें' },
+    askQuestion: { en: '🎙 Ask Question', te: '🎙 ప్రశ్న అడగండి', hi: '🎙 सवाल पूछें' },
+    tryQuestions: {
+      en: 'Try: "Which crop needs less water?" or "Which crop is safer for my soil?"',
+      te: 'ప్రయత్నించండి: "ఏ పంటకు తక్కువ నీరు అవసరం?" లేదా "నా నేలకు ఏ పంట సురక్షితం?"',
+      hi: 'उदाहरण: "किस फसल को कम पानी चाहिए?" या "मेरी मिट्टी के लिए कौन सी फसल सुरक्षित है?"',
+    },
+    agriGuideAnswer: { en: 'AGRIGUIDE ANSWER:', te: 'అగ్రిగైడ్ సమాధానం:', hi: 'एग्रीगाइड उत्तर:' },
+    suitability: { en: 'Suitability', te: 'అనుకూలత', hi: 'अनुकूलता' },
+    selected: { en: 'Selected', te: 'ఎంచుకోబడింది', hi: 'चयनित' },
+    chooseThisCrop: { en: 'Choose this crop', te: 'ఈ పంటను ఎంచుకోండి', hi: 'यह फसल चुनें' },
+    daysDuration: { en: 'Days Duration', te: 'రోజుల పంట కాలం', hi: 'दिन की अवधि' },
+    water: { en: 'Water', te: 'నీటి అవసరం', hi: 'पानी' },
+    estInvestment: { en: 'Est. Investment', te: 'అంచనా పెట్టుబడి', hi: 'अनुमानित लागत' },
+    expectedYield: { en: 'Expected Yield', te: 'ఆశించిన దిగుబడి', hi: 'अनुमानित उपज' },
+    mandiPriceBaseline: { en: 'Mandi Price Baseline', te: 'మార్కెట్ ధర ఆధారం', hi: 'मंडी मूल्य आधार' },
+    estMarginRange: { en: 'Est. Margin Range', te: 'అంచనా నికర లాభం', hi: 'अनुमानित शुद्ध लाभ' },
+    perAcre: { en: '/ac', te: '/ఎకరం', hi: '/एकड़' },
+    qPerAcreEst: { en: 'Q/ac (Est.)', te: 'క్విం./ఎకరం (అంచనా)', hi: 'क्विं./एकड़ (अनुमान)' },
+    source: { en: 'Source', te: 'ఆధారం', hi: 'स्रोत' },
+    disclaimer: { en: '*Estimates only · Profit not guaranteed', te: '*అంచనాలు మాత్రమే · లాభం హామీ లేదు', hi: '*केवल अनुमान · लाभ की गारंटी नहीं' },
+    generateCropPlan: {
+      en: (c: string) => `Generate ${c} Plan`,
+      te: (c: string) => `${c} ప్రణాళికను సిద్ధం చేయండి`,
+      hi: (c: string) => `${c} योजना तैयार करें`,
+    },
+  },
+  step4: {
+    productionPlan: { en: 'Production Plan', te: 'ఉత్పత్తి ప్రణాళిక', hi: 'उत्पादन योजना' },
+    cropStrategySummary: { en: 'Crop Strategy Summary', te: 'పంట వ్యూహం సారాంశం', hi: 'फसल रणनीति सारांश' },
+    estTotalInvestment: { en: 'Est. Total Investment', te: 'మొత్తం అంచనా పెట్టుబడి', hi: 'कुल अनुमानित लागत' },
+    expectedTotalYield: { en: 'Expected Total Yield', te: 'మొత్తం ఆశించిన దిగుబడి', hi: 'कुल अनुमानित उपज' },
+    quintals: { en: 'Quintals', te: 'క్వింటాళ్లు', hi: 'क्विंटल' },
+    estNetMarginRange: { en: 'Est. Net Margin Range', te: 'అంచనా నికర లాభం పరిధి', hi: 'अनुमानित शुद्ध लाभ सीमा' },
+    notGuaranteedBenchmark: { en: 'Not guaranteed · Benchmark grounded', te: 'హామీ లేదు · ప్రమాణాల ఆధారితం', hi: 'गारंटी नहीं · मानकों पर आधारित' },
+    initialManagementActions: { en: 'Initial Management Actions (Schedule)', te: 'ప్రారంభ నిర్వహణ చర్యలు (షెడ్యూల్)', hi: 'प्रारंभिक प्रबंधन कार्य (शेड्यूल)' },
+    listenToSchedule: { en: 'Listen to schedule', te: 'షెడ్యూల్ వినండి', hi: 'शेड्यूल सुनें' },
+    guidanceBasis: { en: 'Guidance Basis:', te: 'మార్గదర్శక ఆధారం:', hi: 'मार्गदर्शन आधार:' },
+    mandi: { en: 'Mandi:', te: 'మార్కెట్:', hi: 'मंडी:' },
+    yieldBenchmark: { en: 'Yield Benchmark:', te: 'దిగుబడి కొలమానం:', hi: 'उपज मानक:' },
+    startThisCrop: { en: '[ Start this crop ]', te: '[ ఈ పంటను ప్రారంభించండి ]', hi: '[ इस फसल को शुरू करें ]' },
+    startingCrop: { en: 'Starting Crop...', te: 'పంటను ప్రారంభిస్తున్నాము...', hi: 'फसल शुरू की जा रही है...' },
+  }
+};
+
+function localizeWaterReq(water: string, lang: Language): string {
+  if (!water || lang === 'en') return water;
+  const w = water.toLowerCase();
+  if (lang === 'te') {
+    if (w.includes('medium')) return 'మధ్యస్థం';
+    if (w.includes('high')) return 'అధికం';
+    if (w.includes('low')) return 'తక్కువ';
+  }
+  if (lang === 'hi') {
+    if (w.includes('medium')) return 'मध्यम';
+    if (w.includes('high')) return 'अधिक';
+    if (w.includes('low')) return 'कम';
+  }
+  return water;
+}
+
+function localizeSuitabilityScore(score: string, lang: Language): string {
+  if (lang === 'en') return `${score} Suitability`;
+  if (lang === 'te') {
+    if (score === 'High') return 'అధిక అనుకూలత';
+    if (score === 'Medium') return 'మధ్యస్థ అనుకూలత';
+    return 'తక్కువ అనుకూలత';
+  }
+  if (lang === 'hi') {
+    if (score === 'High') return 'उच्च अनुकूलता';
+    if (score === 'Medium') return 'मध्यम अनुकूलता';
+    return 'कम अनुकूलता';
+  }
+  return `${score} Suitability`;
+}
+
+function localizeComparisonSummary(summary: string, lang: Language): string {
+  if (!summary || lang === 'en') return summary;
+  if (summary.includes('Verified crop options based on State Agricultural University')) {
+    if (lang === 'te') return 'రాష్ట్ర వ్యవసాయ విశ్వవిద్యాలయ సమాచార నిల్వ ఆధారంగా ధృవీకరించిన పంట ఎంపికలు.';
+    if (lang === 'hi') return 'राज्य कृषि विश्वविद्यालय संदर्भ डेटाबेस पर आधारित सत्यापित फसल विकल्प।';
+  }
+  return summary;
+}
+
+function localizeSuitabilityReason(
+  reason: string, 
+  cropName: string, 
+  soil: string, 
+  irr: string, 
+  lang: Language
+): string {
+  if (!reason || lang === 'en') return reason;
+  const lower = reason.toLowerCase();
+  const locCrop = localizeCropName(cropName, lang);
+  const locSoil = localizeSoil(soil, lang);
+  const locIrr = localizeIrrigation(irr, lang);
+  
+  if (lower.includes('suitable for') || lower.includes('under')) {
+    if (lang === 'te') {
+      return `${locSoil} మరియు ${locIrr} కింద ${locCrop} పంటకు అత్యంత అనుకూలం.`;
+    }
+    if (lang === 'hi') {
+      return `${locSoil} और ${locIrr} के तहत ${locCrop} फसल के लिए उपयुक्त है।`;
+    }
+  }
+  return reason;
+}
+
+function localizePlanSummary(
+  summary: string, 
+  cropName: string, 
+  acres: number, 
+  farmName: string, 
+  lang: Language
+): string {
+  if (!summary || lang === 'en') return summary;
+  if (summary.includes('Comprehensive production plan for') || summary.includes('Grounded in verified weather')) {
+    const localizedCrop = localizeCropName(cropName, lang);
+    if (lang === 'te') {
+      return `${farmName} వద్ద ${acres} ఎకరాల ${localizedCrop} కోసం సమగ్ర ఉత్పత్తి ప్రణాళిక. తాజా వాతావరణం మరియు మార్కెట్ ధరల ఆధారంగా రూపొందించబడింది.`;
+    }
+    if (lang === 'hi') {
+      return `${farmName} में ${acres} एकड़ ${localizedCrop} के लिए व्यापक उत्पादन योजना। ताज़ा मौसम और मंडी अर्थशास्त्र पर आधारित।`;
+    }
+  }
+  return summary;
+}
+
+function localizeMilestoneStep(
+  step: { title: string; timing: string; actionDetails: string }, 
+  lang: Language
+) {
+  if (lang === 'en') return step;
+  const t = step.title.toLowerCase();
+  if (lang === 'te') {
+    if (t.includes('soil preparation') || t.includes('basal') || t.includes('భూమి')) {
+      return {
+        title: 'భూమి తయారీ & ప్రాథమిక ఎరువులు',
+        timing: 'విత్తడానికి 0-7 రోజుల ముందు',
+        actionDetails: 'మంచి పశువుల ఎరువు మరియు భూసార పరీక్ష సిఫార్సుల మేరకు ప్రాథమిక ఎన్‌పీకే ఎరువులు వేయండి.',
+      };
+    }
+    if (t.includes('treated seed') || t.includes('planting') || t.includes('విత్తన')) {
+      return {
+        title: 'విత్తన శుద్ధి & నాటడం',
+        timing: 'విత్తే సమయంలో',
+        actionDetails: 'జీవ శిలీంద్రనాశిని/పురుగుమందుతో శుద్ధి చేసిన ధృవీకరించిన విత్తనాలను సిఫార్సు చేసిన దూరంలో నాటండి.',
+      };
+    }
+    if (t.includes('drip') || t.includes('gap filling') || t.includes('డ్రిప్')) {
+      return {
+        title: 'డ్రిప్ షెడ్యూల్ & ఖాళీల పూడ్చివేత',
+        timing: 'విత్తిన 15-20 రోజుల తర్వాత',
+        actionDetails: 'మొలక రాని ఖాళీలను పూడ్చండి మరియు రోజు విడిచి రోజు 1.5-2 గంటలు డ్రిప్ ద్వారా నీటిని అందించండి.',
+      };
+    }
+    if (t.includes('pheromone') || t.includes('top-dressing') || t.includes('బుట్టల') || t.includes('ట్రాప్')) {
+      return {
+        title: 'లింగాకర్షక బుట్టల ఏర్పాటు & పైపాటు ఎరువులు',
+        timing: 'విత్తిన 40-45 రోజుల తర్వాత',
+        actionDetails: 'ఎకరానికి 5 లింగాకర్షక బుట్టలను అమర్చండి మరియు మొదటి విడత నత్రజని ఎరువును పైపాటుగా వేయండి.',
+      };
+    }
+  } else if (lang === 'hi') {
+    if (t.includes('soil preparation') || t.includes('basal')) {
+      return {
+        title: 'खेत की तैयारी और बुनियादी उर्वरक',
+        timing: 'बुवाई से 0-7 दिन पहले',
+        actionDetails: 'अच्छी सड़ी गोबर की खाद और मिट्टी परीक्षण के अनुसार बुनियादी एनपीके उर्वरक डालें।',
+      };
+    }
+    if (t.includes('treated seed') || t.includes('planting')) {
+      return {
+        title: 'उपचारित बीज बुवाई',
+        timing: 'बुवाई के समय',
+        actionDetails: 'जैव-कवकनाशी/कीटनाशक से उपचारित प्रमाणित हाइब्रिड बीज को उचित दूरी पर बोएं।',
+      };
+    }
+    if (t.includes('drip') || t.includes('gap filling')) {
+      return {
+        title: 'ड्रिप शेड्यूलिंग और गैप फिलिंग',
+        timing: 'बुवाई के 15-20 दिन बाद',
+        actionDetails: 'अंकुरण अंतराल को भरें और एक दिन छोड़कर 1.5 - 2 घंटे ड्रिप चलाएं।',
+      };
+    }
+    if (t.includes('pheromone') || t.includes('top-dressing')) {
+      return {
+        title: 'फेरोमोन ट्रैप और टॉप-ड्रेसिंग',
+        timing: 'बुवाई के 40-45 दिन बाद',
+        actionDetails: 'प्रति एकड़ 5 फेरोमोन ट्रैप लगाएं और पहली बार नाइट्रोजन उर्वरक का छिड़काव/टॉप ड्रेसिंग करें।',
+      };
+    }
+  }
+  return step;
+}
+
+function localizeMarginNote(note: string, lang: Language): string {
+  if (!note || lang === 'en') return note;
+  if (note.includes('ESTIMATE ONLY') || note.includes('Profit is NOT guaranteed')) {
+    if (lang === 'te') {
+      return 'కేవలం అంచనా మాత్రమే. లాభం హామీ లేదు. నికర రాబడి వర్షపాతం, తెగుళ్ల తీవ్రత మరియు మార్కెట్ ధరలపై ఆధారపడి ఉంటుంది.';
+    }
+    if (lang === 'hi') {
+      return 'केवल अनुमान। लाभ की गारंटी नहीं है। शुद्ध आय वर्षा वितरण, कीट प्रकोप और बाजार भाव पर निर्भर करती है।';
+    }
+  }
+  return note;
+}
+
+function localizeBenchmarkSource(source: string, lang: Language): string {
+  if (!source || lang === 'en') return source;
+  if (source.includes('State Agricultural University') || source.includes('ICAR')) {
+    if (lang === 'te') return 'రాష్ట్ర వ్యవసాయ విశ్వవిద్యాలయం / ICAR మార్గదర్శకాలు';
+    if (lang === 'hi') return 'राज्य कृषि विश्वविद्यालय / ICAR दिशानिर्देश';
+  }
+  return source;
+}
 
 interface PlanCropWizardProps {
   isOpen: boolean;
@@ -53,6 +348,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
   const [farmDistrict, setFarmDistrict] = useState<string>(location.district || 'Warangal');
   const [farmState, setFarmState] = useState<string>(location.state || 'Telangana');
   const [farmVillage, setFarmVillage] = useState<string>(location.village || '');
+  const [showLocationMapModal, setShowLocationMapModal] = useState<boolean>(false);
 
   // Step 2: Field Info State
   const [plannedAcres, setPlannedAcres] = useState<number>(2.0);
@@ -229,7 +525,13 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
   const handleProceedToStep2 = () => {
     setErrorMessage('');
     if (totalFarmAcres <= 0) {
-      setErrorMessage('Please specify valid farm acreage.');
+      setErrorMessage(
+        currentLang === 'te'
+          ? 'దయచేసి సరైన పొలం విస్తీర్ణాన్ని నమోదు చేయండి.'
+          : currentLang === 'hi'
+          ? 'कृपया खेत का सही रकबा दर्ज करें।'
+          : 'Please specify valid farm acreage.'
+      );
       return;
     }
     setCurrentStep(2);
@@ -238,12 +540,24 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
   const handleProceedToStep3 = async () => {
     setErrorMessage('');
     if (plannedAcres <= 0) {
-      setErrorMessage('Planned acreage must be greater than zero.');
+      setErrorMessage(
+        currentLang === 'te'
+          ? 'ప్లాన్ చేసిన విస్తీర్ణం సున్నా కంటే ఎక్కువగా ఉండాలి.'
+          : currentLang === 'hi'
+          ? 'नियोजित रकबा शून्य से अधिक होना चाहिए।'
+          : 'Planned acreage must be greater than zero.'
+      );
       return;
     }
 
     if (isAcreageExceeded) {
-      setErrorMessage(`Cannot allocate ${plannedAcres} acres. Only ${availableOnFarm.toFixed(1)} acres unallocated on ${farmName}.`);
+      setErrorMessage(
+        currentLang === 'te'
+          ? `${plannedAcres} ఎకరాలు కేటాయించలేము. ${farmName} లో ${availableOnFarm.toFixed(1)} ఎకరాలు మాత్రమే అందుబాటులో ఉన్నాయి.`
+          : currentLang === 'hi'
+          ? `${plannedAcres} एकड़ आवंटित नहीं किया जा सकता। ${farmName} में केवल ${availableOnFarm.toFixed(1)} एकड़ उपलब्ध है।`
+          : `Cannot allocate ${plannedAcres} acres. Only ${availableOnFarm.toFixed(1)} acres unallocated on ${farmName}.`
+      );
       return;
     }
 
@@ -333,7 +647,14 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
         SpeechService.speak(plan.summary, currentLang);
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to generate crop plan.');
+      console.warn('[PlanCrop] Plan generation error:', err.message);
+      setErrorMessage(
+        currentLang === 'te' 
+          ? 'ప్రస్తుతం ఉత్పత్తి ప్రణాళికను సిద్ధం చేయలేకపోయాము. దయచేసి మళ్లీ ప్రయత్నించండి.' 
+          : (currentLang === 'hi' 
+              ? 'हम अभी आपकी उत्पादन योजना तैयार नहीं कर सके। कृपया पुनः प्रयास करें।' 
+              : "We couldn't prepare your production plan right now. Please try again.")
+      );
     } finally {
       setIsGeneratingPlan(false);
     }
@@ -343,7 +664,13 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
     if (!selectedCrop || !planResult) return;
 
     if (isAcreageExceeded) {
-      setErrorMessage(`No unallocated acreage available on this farm (Available: ${availableOnFarm} acres, Requested: ${plannedAcres} acres).`);
+      setErrorMessage(
+        currentLang === 'te'
+          ? `ఈ పొలంలో కేటాయించని విస్తీర్ణం అందుబాటులో లేదు (అందుబాటులో ఉంది: ${availableOnFarm} ఎకరాలు, కోరినది: ${plannedAcres} ఎకరాలు).`
+          : currentLang === 'hi'
+          ? `इस खेत पर कोई असंबद्ध रकबा उपलब्ध नहीं है (उपलब्ध: ${availableOnFarm} एकड़, अनुरोधित: ${plannedAcres} एकड़)।`
+          : `No unallocated acreage available on this farm (Available: ${availableOnFarm} acres, Requested: ${plannedAcres} acres).`
+      );
       return;
     }
 
@@ -363,16 +690,16 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
         plotName: `${selectedCrop.cropName} Plot (${plannedAcres} Acres)`,
         currentCrop: selectedCrop.cropName,
         variety: planResult.variety || 'Recommended Hybrid',
-        sowingDate: new Date().toISOString().split('T')[0],
+        sowingDate: getTodayISTDateString(),
         stage: 'Planned / Sowing Stage',
         initialManagementPlan: planResult.initialCropManagementPlan,
       });
 
       // Announce success
       const successSpeech = currentLang === 'te'
-        ? `${selectedCrop.cropName} పంట విజయవంతంగా ప్రారంభించబడింది!`
+        ? `${localizeCropName(selectedCrop.cropName, currentLang)} పంట విజయవంతంగా ప్రారంభించబడింది!`
         : currentLang === 'hi'
-        ? `${selectedCrop.cropName} फसल सफलतापूर्वक शुरू हो गई!`
+        ? `${localizeCropName(selectedCrop.cropName, currentLang)} फसल सफलतापूर्वक शुरू हो गई!`
         : `Successfully started ${selectedCrop.cropName} crop on ${plannedAcres} acres!`;
       SpeechService.speak(successSpeech, currentLang);
 
@@ -380,7 +707,14 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
       onClose();
     } catch (err: any) {
       console.error('[PlanCrop] Start crop error:', err);
-      setErrorMessage(err.message || 'Database error starting crop. Please try again.');
+      setErrorMessage(
+        err.message || 
+        (currentLang === 'te'
+          ? 'పంటను ప్రారంభించడంలో లోపం ఏర్పడింది. దయచేసి మళ్లీ ప్రయత్నించండి.'
+          : currentLang === 'hi'
+          ? 'फसल शुरू करने में त्रुटि हुई। कृपया पुनः प्रयास करें।'
+          : 'Database error starting crop. Please try again.')
+      );
     } finally {
       setIsStartingCrop(false);
     }
@@ -440,18 +774,18 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={{ fontSize: '11px', fontWeight: 800, color: 'var(--ag-color-primary-base)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                Step {currentStep} of 4
+                {WIZARD_STRINGS.step[currentLang]} {currentStep} {WIZARD_STRINGS.of[currentLang]} 4
               </span>
               <span style={{ color: 'var(--ag-color-text-secondary)', fontSize: '11px' }}>·</span>
               <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)' }}>
-                {currentStep === 1 ? 'Farm Context' : currentStep === 2 ? 'Field Parameters' : currentStep === 3 ? 'Crop Comparison' : 'Production Plan'}
+                {WIZARD_STRINGS.steps[currentStep as 1 | 2 | 3 | 4]?.[currentLang] || WIZARD_STRINGS.steps[1][currentLang]}
               </span>
             </div>
             <h3 style={{ margin: '2px 0 0 0', fontSize: '18px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
               {currentStep === 1 && t.tellAgriGuideAboutFarm}
-              {currentStep === 2 && 'Field & Irrigation Information'}
+              {currentStep === 2 && WIZARD_STRINGS.titles[2][currentLang]}
               {currentStep === 3 && t.whatCanIGrowHere}
-              {currentStep === 4 && `${selectedCrop?.cropName} Production Plan`}
+              {currentStep === 4 && (selectedCrop?.cropName ? `${localizeCropName(selectedCrop.cropName, currentLang)} ${WIZARD_STRINGS.step4.productionPlan[currentLang]}` : WIZARD_STRINGS.step4.productionPlan[currentLang])}
             </h3>
           </div>
 
@@ -556,7 +890,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
               {farms.length > 0 && (
                 <div>
                   <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-primary)', textTransform: 'uppercase', marginBottom: '8px' }}>
-                    Select Existing Farm or Describe New
+                    {WIZARD_STRINGS.step1.selectExistingOrNew[currentLang]}
                   </label>
                   <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                     {farms.map((f) => {
@@ -580,7 +914,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                         >
                           <div style={{ fontWeight: 800 }}>{f.farmName}</div>
                           <div style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)', marginTop: '2px' }}>
-                            {f.totalAcres} Acres ({f.availableAcres !== undefined ? f.availableAcres.toFixed(1) : f.totalAcres} Available)
+                            {f.totalAcres} {WIZARD_STRINGS.step1.acres[currentLang]} ({f.availableAcres !== undefined ? f.availableAcres.toFixed(1) : f.totalAcres} {WIZARD_STRINGS.step1.acresAvailable[currentLang]})
                           </div>
                         </button>
                       );
@@ -602,7 +936,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                         cursor: 'pointer',
                       }}
                     >
-                      + Describe New Farm
+                      {WIZARD_STRINGS.step1.describeNewFarm[currentLang]}
                     </button>
                   </div>
                 </div>
@@ -614,87 +948,132 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                 border: '1px solid var(--ag-border-default)',
                 borderRadius: '16px',
                 padding: '16px',
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                display: 'flex',
+                flexDirection: 'column',
                 gap: '14px',
               }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
-                    Farm Name
-                  </label>
-                  <input
-                    type="text"
-                    value={farmName}
-                    onChange={(e) => setFarmName(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--ag-border-default)',
-                      fontSize: '14px',
-                      fontWeight: 700,
-                    }}
-                  />
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
+                      {WIZARD_STRINGS.step1.farmName[currentLang]}
+                    </label>
+                    <input
+                      type="text"
+                      value={farmName}
+                      onChange={(e) => setFarmName(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: '1px solid var(--ag-border-default)',
+                        fontSize: '14px',
+                        fontWeight: 700,
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
+                      {WIZARD_STRINGS.step1.totalFarmAcres[currentLang]}
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0.5"
+                      value={totalFarmAcres}
+                      onChange={(e) => setTotalFarmAcres(parseFloat(e.target.value) || 0)}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: '1px solid var(--ag-border-default)',
+                        fontSize: '14px',
+                        fontWeight: 700,
+                      }}
+                    />
+                  </div>
                 </div>
 
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
-                    Total Farm Acres
-                  </label>
-                  <input
-                    type="number"
-                    step="0.5"
-                    min="0.5"
-                    value={totalFarmAcres}
-                    onChange={(e) => setTotalFarmAcres(parseFloat(e.target.value) || 0)}
+                {/* Location Map Pinning Quick Action */}
+                <div style={{
+                  padding: '10px 14px',
+                  backgroundColor: '#FFFFFF',
+                  borderRadius: '12px',
+                  border: '1px solid var(--ag-border-default)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '8px',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <MapPin size={16} color="var(--ag-color-primary-base)" />
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-primary)' }}>
+                      {WIZARD_STRINGS.step1.location[currentLang]}: {localizeLocation(farmDistrict, farmState, currentLang, farmVillage)}
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowLocationMapModal(true)}
                     style={{
-                      width: '100%',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--ag-border-default)',
-                      fontSize: '14px',
-                      fontWeight: 700,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      backgroundColor: 'var(--ag-color-primary-light)',
+                      color: 'var(--ag-color-primary-dark)',
+                      border: '1px solid #A3D9A5',
+                      padding: '6px 12px',
+                      borderRadius: 'var(--ag-radius-full)',
+                      fontSize: '12px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
                     }}
-                  />
+                  >
+                    <MapPin size={13} />
+                    <span>{WIZARD_STRINGS.step1.pinOnMap[currentLang]}</span>
+                  </button>
                 </div>
 
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
-                    District
-                  </label>
-                  <input
-                    type="text"
-                    value={farmDistrict}
-                    onChange={(e) => setFarmDistrict(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--ag-border-default)',
-                      fontSize: '14px',
-                      fontWeight: 700,
-                    }}
-                  />
-                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
+                      {WIZARD_STRINGS.step1.district[currentLang]}
+                    </label>
+                    <input
+                      type="text"
+                      value={farmDistrict}
+                      onChange={(e) => setFarmDistrict(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: '1px solid var(--ag-border-default)',
+                        fontSize: '14px',
+                        fontWeight: 700,
+                      }}
+                    />
+                  </div>
 
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
-                    Village / Mandal
-                  </label>
-                  <input
-                    type="text"
-                    value={farmVillage}
-                    onChange={(e) => setFarmVillage(e.target.value)}
-                    placeholder="e.g. Geesugonda"
-                    style={{
-                      width: '100%',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--ag-border-default)',
-                      fontSize: '14px',
-                      fontWeight: 700,
-                    }}
-                  />
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>
+                      {WIZARD_STRINGS.step1.villageMandal[currentLang]}
+                    </label>
+                    <input
+                      type="text"
+                      value={farmVillage}
+                      onChange={(e) => setFarmVillage(e.target.value)}
+                      placeholder={WIZARD_STRINGS.step1.villagePlaceholder[currentLang]}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: '1px solid var(--ag-border-default)',
+                        fontSize: '14px',
+                        fontWeight: 700,
+                      }}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -714,7 +1093,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                 textAlign: 'center',
               }}>
                 <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--ag-color-primary-dark)', margin: '0 0 10px 0' }}>
-                  🎙 "My field is red loamy soil, borewell drip irrigation, planning 2 acres."
+                  {WIZARD_STRINGS.step2.voicePrompt[currentLang]}
                 </p>
                 <button
                   type="button"
@@ -736,13 +1115,13 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   }}
                 >
                   {isRecording ? <Square size={16} fill="#FFFFFF" /> : <Mic size={16} />}
-                  <span>{isRecording ? 'Listening... Tap to stop' : '🎙 Speak Field Details'}</span>
+                  <span>{isRecording ? WIZARD_STRINGS.step2.listening[currentLang] : WIZARD_STRINGS.step2.speakFieldDetails[currentLang]}</span>
                 </button>
 
                 {lastVoiceTranscript && (
                   <div style={{ marginTop: '12px', textAlign: 'left', backgroundColor: '#FFFFFF', padding: '10px', borderRadius: '8px', border: '1px solid #A3D9A5' }}>
                     <span style={{ fontSize: '10px', fontWeight: 800, color: 'var(--ag-color-primary-dark)', textTransform: 'uppercase' }}>
-                      YOU SAID:
+                      {WIZARD_STRINGS.step2.youSaid[currentLang]}
                     </span>
                     <p style={{ margin: '2px 0 0 0', fontSize: '13px', color: 'var(--ag-color-text-primary)', fontWeight: 600 }}>
                       "{lastVoiceTranscript}"
@@ -755,7 +1134,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-primary)', marginBottom: '6px' }}>
-                    Acres Planned for this Crop
+                    {WIZARD_STRINGS.step2.acresPlanned[currentLang]}
                   </label>
                   <input
                     type="number"
@@ -775,14 +1154,18 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   />
                   {selectedFarmId !== 'new_farm' && currentFarmObj && (
                     <div style={{ fontSize: '11px', color: isAcreageExceeded ? 'var(--ag-color-danger-base)' : 'var(--ag-color-text-secondary)', marginTop: '4px', fontWeight: 600 }}>
-                      {availableOnFarm.toFixed(1)} acres unallocated on {farmName}
+                      {currentLang === 'te' 
+                        ? `${farmName} లో ${availableOnFarm.toFixed(1)} ఎకరాలు కేటాయించలేదు` 
+                        : currentLang === 'hi' 
+                        ? `${farmName} में ${availableOnFarm.toFixed(1)} एकड़ असंबद्ध हैं` 
+                        : `${availableOnFarm.toFixed(1)} acres unallocated on ${farmName}`}
                     </div>
                   )}
                 </div>
 
                 <div>
                   <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-primary)', marginBottom: '6px' }}>
-                    Soil Type
+                    {WIZARD_STRINGS.step2.soilType[currentLang]}
                   </label>
                   <select
                     value={soilType}
@@ -796,16 +1179,24 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                       fontWeight: 700,
                     }}
                   >
-                    <option value="Red Loamy Soil">Red Loamy Soil (చల్కా / ఎర్ర నేల)</option>
-                    <option value="Black Cotton Soil">Black Cotton Soil (నల్ల రేగడి)</option>
-                    <option value="Sandy Loam">Sandy Loam (ఇసుక నేల)</option>
-                    <option value="Clayey Loam">Clayey / Heavy Loam (జిగురు నేల)</option>
+                    <option value="Red Loamy Soil">
+                      {currentLang === 'te' ? 'ఎర్ర నేల (చల్కా నేల)' : currentLang === 'hi' ? 'लाल दोमट मिट्टी (Red Loam)' : 'Red Loamy Soil (చల్కా / ఎర్ర నేల)'}
+                    </option>
+                    <option value="Black Cotton Soil">
+                      {currentLang === 'te' ? 'నల్ల రేగడి నేల' : currentLang === 'hi' ? 'काली मिट्टी (Black Cotton)' : 'Black Cotton Soil (నల్ల రేగడి)'}
+                    </option>
+                    <option value="Sandy Loam">
+                      {currentLang === 'te' ? 'ఇసుక నేల' : currentLang === 'hi' ? 'बलुई दोमट मिट्टी (Sandy Loam)' : 'Sandy Loam (ఇసుక నేల)'}
+                    </option>
+                    <option value="Clayey Loam">
+                      {currentLang === 'te' ? 'జిగురు / బంక మట్టి నేల' : currentLang === 'hi' ? 'चिकनी दोमट मिट्टी (Clayey Loam)' : 'Clayey / Heavy Loam (జిగురు నేల)'}
+                    </option>
                   </select>
                 </div>
 
                 <div>
                   <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-primary)', marginBottom: '6px' }}>
-                    Irrigation Source
+                    {WIZARD_STRINGS.step2.irrigationSource[currentLang]}
                   </label>
                   <select
                     value={irrigationSource}
@@ -819,16 +1210,24 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                       fontWeight: 700,
                     }}
                   >
-                    <option value="Borewell & Drip">Borewell & Drip (డ్రిప్ ఇరిగేషన్)</option>
-                    <option value="Borewell Flood">Borewell (కాలువ / వరద)</option>
-                    <option value="Canal Irrigation">Canal Irrigation (సాగునీటి కాలువ)</option>
-                    <option value="Rainfed (Monsoon)">Rainfed (వర్షాధార)</option>
+                    <option value="Borewell & Drip">
+                      {currentLang === 'te' ? 'బోరుబావి & బిందు సేద్యం (డ్రిప్)' : currentLang === 'hi' ? 'बोरवेल और ड्रिप सिंचाई' : 'Borewell & Drip (డ్రిప్ ఇరిగేషన్)'}
+                    </option>
+                    <option value="Borewell Flood">
+                      {currentLang === 'te' ? 'బోరుబావి (కాలువ / పారక)' : currentLang === 'hi' ? 'बोरवेल (खुली सिंचाई)' : 'Borewell (కాలువ / వరద)'}
+                    </option>
+                    <option value="Canal Irrigation">
+                      {currentLang === 'te' ? 'సాగునీటి కాలువ' : currentLang === 'hi' ? 'नहर सिंचाई (Canal)' : 'Canal Irrigation (సాగునీటి కాలువ)'}
+                    </option>
+                    <option value="Rainfed (Monsoon)">
+                      {currentLang === 'te' ? 'వర్షాధారం (వానకాలం)' : currentLang === 'hi' ? 'वर्षा आधारित (मानसून)' : 'Rainfed (వర్షాధార)'}
+                    </option>
                   </select>
                 </div>
 
                 <div>
                   <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-primary)', marginBottom: '6px' }}>
-                    Planting Season / Window
+                    {WIZARD_STRINGS.step2.plantingSeason[currentLang]}
                   </label>
                   <select
                     value={sowingWindow}
@@ -842,9 +1241,15 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                       fontWeight: 700,
                     }}
                   >
-                    <option value="Kharif (June - July)">Kharif (June - July Onset)</option>
-                    <option value="Rabi (Oct - Nov)">Rabi (October - November)</option>
-                    <option value="Summer (Jan - Feb)">Summer / Zaid (Jan - Feb)</option>
+                    <option value="Kharif (June - July)">
+                      {currentLang === 'te' ? 'ఖరీఫ్ (జూన్ - జూలై ప్రారంభం)' : currentLang === 'hi' ? 'खरीफ (जून - जुलाई)' : 'Kharif (June - July Onset)'}
+                    </option>
+                    <option value="Rabi (Oct - Nov)">
+                      {currentLang === 'te' ? 'రబీ (అక్టోబర్ - నవంబర్)' : currentLang === 'hi' ? 'रबी (अक्टूबर - नवंबर)' : 'Rabi (October - November)'}
+                    </option>
+                    <option value="Summer (Jan - Feb)">
+                      {currentLang === 'te' ? 'వేసవి / జాయెద్ (జనవరి - ఫిబ్రవరి)' : currentLang === 'hi' ? 'जायद / ग्रीष्म (जनवरी - फरवरी)' : 'Summer / Zaid (Jan - Feb)'}
+                    </option>
                   </select>
                 </div>
               </div>
@@ -860,12 +1265,19 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                 alignItems: 'center',
               }}>
                 <div style={{ fontSize: '13px', color: 'var(--ag-color-text-primary)', fontWeight: 600 }}>
-                  🌾 <strong>{plannedAcres} Acres</strong> · {soilType} · {irrigationSource} · {sowingWindow}
+                  🌾 <strong>{plannedAcres} {WIZARD_STRINGS.step1.acres[currentLang]}</strong> · {localizeSoil(soilType, currentLang)} · {localizeIrrigation(irrigationSource, currentLang)} · {sowingWindow}
                 </div>
                 <button
                   type="button"
                   onClick={() => {
-                    const text = `You told me your field is ${plannedAcres} acres on ${soilType} with ${irrigationSource} for ${sowingWindow}.`;
+                    let text = '';
+                    if (currentLang === 'te') {
+                      text = `మీ చేను ${plannedAcres} ఎకరాలు, ${localizeSoil(soilType, 'te')}, ${localizeIrrigation(irrigationSource, 'te')}, మరియు ${sowingWindow} అని చెప్పారు.`;
+                    } else if (currentLang === 'hi') {
+                      text = `आपने बताया कि आपका खेत ${plannedAcres} एकड़, ${localizeSoil(soilType, 'hi')}, ${localizeIrrigation(irrigationSource, 'hi')}, और ${sowingWindow} के लिए है।`;
+                    } else {
+                      text = `You told me your field is ${plannedAcres} acres on ${soilType} with ${irrigationSource} for ${sowingWindow}.`;
+                    }
                     SpeechService.speak(text, currentLang);
                   }}
                   style={{
@@ -881,7 +1293,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   }}
                 >
                   <Volume2 size={15} />
-                  <span>Listen</span>
+                  <span>{WIZARD_STRINGS.step2.listen[currentLang]}</span>
                 </button>
               </div>
             </div>
@@ -896,10 +1308,10 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                 <div style={{ textAlign: 'center', padding: '40px 20px' }}>
                   <Sparkles size={32} color="var(--ag-color-primary-base)" style={{ animation: 'spin 2s linear infinite', margin: '0 auto 12px auto' }} />
                   <h4 style={{ fontSize: '16px', fontWeight: 800, margin: '0 0 6px 0', color: 'var(--ag-color-text-primary)' }}>
-                    Analyzing Verified Agronomic Data & Economics...
+                    {WIZARD_STRINGS.step3.analyzingTitle[currentLang]}
                   </h4>
                   <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', margin: 0 }}>
-                    Grounding comparison in live Warangal weather, APMC Mandi price baselines, and ICAR benchmarks.
+                    {WIZARD_STRINGS.step3.analyzingSubtitle[currentLang]}
                   </p>
                 </div>
               )}
@@ -920,15 +1332,15 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   }}>
                     <div>
                       <span style={{ fontSize: '11px', fontWeight: 800, color: 'var(--ag-color-primary-dark)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                        Agronomic Assessment
+                        {WIZARD_STRINGS.step3.agronomicAssessment[currentLang]}
                       </span>
                       <p style={{ margin: '4px 0 0 0', fontSize: '14px', fontWeight: 700, color: 'var(--ag-color-text-primary)', lineHeight: 1.4 }}>
-                        {comparisonResult.summary}
+                        {localizeComparisonSummary(comparisonResult.summary, currentLang)}
                       </p>
                     </div>
                     <button
                       type="button"
-                      onClick={() => toggleSpeakSection('comparison_summary', comparisonResult.summary)}
+                      onClick={() => toggleSpeakSection('comparison_summary', localizeComparisonSummary(comparisonResult.summary, currentLang))}
                       style={{
                         backgroundColor: '#FFFFFF',
                         border: '1px solid #A3D9A5',
@@ -945,7 +1357,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                       }}
                     >
                       <Volume2 size={15} />
-                      <span>{activeSpeechSection === 'comparison_summary' ? 'Stop' : 'Listen'}</span>
+                      <span>{activeSpeechSection === 'comparison_summary' ? WIZARD_STRINGS.step3.stop[currentLang] : WIZARD_STRINGS.step3.listen[currentLang]}</span>
                     </button>
                   </div>
 
@@ -959,7 +1371,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                       <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
-                        🎙 Ask AgriGuide about these crops
+                        {WIZARD_STRINGS.step3.askAgriGuideTitle[currentLang]}
                       </span>
                       <button
                         type="button"
@@ -980,18 +1392,18 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                         }}
                       >
                         {isRecording ? <Square size={13} fill="currentColor" /> : <Mic size={14} />}
-                        <span>{isRecording ? 'Stop' : '🎙 Ask Question'}</span>
+                        <span>{isRecording ? WIZARD_STRINGS.step3.stop[currentLang] : WIZARD_STRINGS.step3.askQuestion[currentLang]}</span>
                       </button>
                     </div>
 
                     <p style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)', margin: '0 0 8px 0' }}>
-                      Try: <em>"Which crop needs less water?"</em> or <em>"Which crop is safer for my soil?"</em>
+                      {WIZARD_STRINGS.step3.tryQuestions[currentLang]}
                     </p>
 
                     {voiceQAAnswer && (
                       <div style={{ backgroundColor: '#FFFFFF', padding: '10px 14px', borderRadius: '10px', border: '1px solid var(--ag-border-default)' }}>
                         <span style={{ fontSize: '10px', fontWeight: 800, color: 'var(--ag-color-primary-base)', textTransform: 'uppercase' }}>
-                          AGRIGUIDE ANSWER:
+                          {WIZARD_STRINGS.step3.agriGuideAnswer[currentLang]}
                         </span>
                         <p style={{ margin: '2px 0 0 0', fontSize: '13px', fontWeight: 600, color: 'var(--ag-color-text-primary)' }}>
                           {voiceQAAnswer}
@@ -1021,7 +1433,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                             <div>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                 <h4 style={{ fontSize: '18px', fontWeight: 800, margin: 0, color: 'var(--ag-color-text-primary)' }}>
-                                  {crop.cropName} {crop.localName ? `(${crop.localName})` : ''}
+                                  {localizeCropName(crop.cropName, currentLang)} {crop.localName ? `(${crop.localName})` : ''}
                                 </h4>
                                 <span style={{
                                   backgroundColor: crop.suitabilityScore === 'High' ? 'var(--ag-color-primary-light)' : 'var(--ag-color-harvest-light)',
@@ -1031,11 +1443,11 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                                   padding: '2px 8px',
                                   borderRadius: 'var(--ag-radius-full)',
                                 }}>
-                                  {crop.suitabilityScore} Suitability
+                                  {localizeSuitabilityScore(crop.suitabilityScore, currentLang)}
                                 </span>
                               </div>
                               <p style={{ fontSize: '12px', color: 'var(--ag-color-text-secondary)', margin: '4px 0 0 0' }}>
-                                {crop.scientificName} · {crop.durationDays} Days Duration · Water: {crop.waterRequirement}
+                                {crop.scientificName} · {crop.durationDays} {WIZARD_STRINGS.step3.daysDuration[currentLang]} · {WIZARD_STRINGS.step3.water[currentLang]}: {localizeWaterReq(crop.waterRequirement, currentLang)}
                               </p>
                             </div>
 
@@ -1057,13 +1469,13 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                               }}
                             >
                               <Check size={14} />
-                              <span>{isSelected ? 'Selected' : 'Choose this crop'}</span>
+                              <span>{isSelected ? WIZARD_STRINGS.step3.selected[currentLang] : WIZARD_STRINGS.step3.chooseThisCrop[currentLang]}</span>
                             </button>
                           </div>
 
                           {/* Suitability reason */}
                           <p style={{ fontSize: '13px', color: 'var(--ag-color-text-primary)', margin: '10px 0', fontWeight: 600 }}>
-                            {crop.suitabilityReason}
+                            {localizeSuitabilityReason(crop.suitabilityReason, crop.cropName, soilType, irrigationSource, currentLang)}
                           </p>
 
                           {/* Data-Driven Economic Metrics Grid */}
@@ -1078,25 +1490,25 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                           }}>
                             <div>
                               <span style={{ color: 'var(--ag-color-text-secondary)', display: 'block', fontSize: '10px', textTransform: 'uppercase', fontWeight: 700 }}>
-                                Est. Investment
+                                {WIZARD_STRINGS.step3.estInvestment[currentLang]}
                               </span>
                               <strong style={{ color: 'var(--ag-color-text-primary)' }}>
-                                ₹{crop.estimatedInvestmentPerAcre.min.toLocaleString('en-IN')} - ₹{crop.estimatedInvestmentPerAcre.max.toLocaleString('en-IN')}/ac
+                                ₹{crop.estimatedInvestmentPerAcre.min.toLocaleString('en-IN')} - ₹{crop.estimatedInvestmentPerAcre.max.toLocaleString('en-IN')}{WIZARD_STRINGS.step3.perAcre[currentLang]}
                               </strong>
                             </div>
 
                             <div>
                               <span style={{ color: 'var(--ag-color-text-secondary)', display: 'block', fontSize: '10px', textTransform: 'uppercase', fontWeight: 700 }}>
-                                Expected Yield
+                                {WIZARD_STRINGS.step3.expectedYield[currentLang]}
                               </span>
                               <strong style={{ color: 'var(--ag-color-text-primary)' }}>
-                                {crop.expectedYieldPerAcre.minQ} - {crop.expectedYieldPerAcre.maxQ} Q/ac (Est.)
+                                {crop.expectedYieldPerAcre.minQ} - {crop.expectedYieldPerAcre.maxQ} {WIZARD_STRINGS.step3.qPerAcreEst[currentLang]}
                               </strong>
                             </div>
 
                             <div>
                               <span style={{ color: 'var(--ag-color-text-secondary)', display: 'block', fontSize: '10px', textTransform: 'uppercase', fontWeight: 700 }}>
-                                Mandi Price Baseline
+                                {WIZARD_STRINGS.step3.mandiPriceBaseline[currentLang]}
                               </span>
                               <strong style={{ color: crop.mandiPrice.includes('unavailable') ? 'var(--ag-color-text-secondary)' : 'var(--ag-color-primary-base)' }}>
                                 {crop.mandiPrice}
@@ -1105,18 +1517,18 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
 
                             <div>
                               <span style={{ color: 'var(--ag-color-text-secondary)', display: 'block', fontSize: '10px', textTransform: 'uppercase', fontWeight: 700 }}>
-                                Est. Margin Range
+                                {WIZARD_STRINGS.step3.estMarginRange[currentLang]}
                               </span>
                               <strong style={{ color: 'var(--ag-color-primary-dark)' }}>
-                                ₹{crop.estimatedMarginPerAcre.min.toLocaleString('en-IN')} - ₹{crop.estimatedMarginPerAcre.max.toLocaleString('en-IN')}/ac*
+                                ₹{crop.estimatedMarginPerAcre.min.toLocaleString('en-IN')} - ₹{crop.estimatedMarginPerAcre.max.toLocaleString('en-IN')}{WIZARD_STRINGS.step3.perAcre[currentLang]}*
                               </strong>
                             </div>
                           </div>
 
                           {/* Provenance Footer */}
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px', fontSize: '11px', color: 'var(--ag-color-text-secondary)' }}>
-                            <span>🏛 Source: {crop.dataSource}</span>
-                            <span style={{ fontStyle: 'italic' }}>*Estimates only · Profit not guaranteed</span>
+                            <span>🏛 {WIZARD_STRINGS.step3.source[currentLang]}: {crop.dataSource}</span>
+                            <span style={{ fontStyle: 'italic' }}>{WIZARD_STRINGS.step3.disclaimer[currentLang]}</span>
                           </div>
                         </div>
                       );
@@ -1136,11 +1548,47 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                 <div style={{ textAlign: 'center', padding: '50px 20px' }}>
                   <Sparkles size={36} color="var(--ag-color-primary-base)" style={{ animation: 'spin 2s linear infinite', margin: '0 auto 16px auto' }} />
                   <h4 style={{ fontSize: '18px', fontWeight: 800, margin: '0 0 8px 0', color: 'var(--ag-color-text-primary)' }}>
-                    Formulating Production Plan with Fireworks GLM-5.3-Flash...
+                    {currentLang === 'te' 
+                      ? 'మీ ఉత్పత్తి ప్రణాళికను సిద్ధం చేస్తున్నాము...' 
+                      : (currentLang === 'hi' ? 'आपकी उत्पादन योजना तैयार की जा रही है...' : 'Preparing your production plan...')}
                   </h4>
-                  <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', margin: 0 }}>
-                    Reasoning over {plannedAcres} acres of {selectedCrop?.cropName} in {farmDistrict} with live weather & university benchmarks.
+                  <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', margin: 0, maxWidth: '440px', marginLeft: 'auto', marginRight: 'auto', lineHeight: 1.5 }}>
+                    {currentLang === 'te'
+                      ? `మీ ${selectedCrop?.cropName ? localizeCropName(selectedCrop.cropName, currentLang) : 'పంట'}, ${plannedAcres} ఎకరాల పొలం, వాతావరణం మరియు ధృవీకరించిన వ్యవసాయ మార్గదర్శకాల ఆధారంగా రూపొందిస్తున్నాము.`
+                      : (currentLang === 'hi'
+                          ? `आपकी ${selectedCrop?.cropName ? localizeCropName(selectedCrop.cropName, currentLang) : 'फसल'}, ${plannedAcres} एकड़ खेत, मौसम और प्रमाणित कृषि मार्गदर्शन का उपयोग करके तैयार कर रहे हैं।`
+                          : `Using your ${selectedCrop?.cropName || 'crop'}, ${plannedAcres} acres in ${farmDistrict}, live weather, and verified agricultural guidance.`)}
                   </p>
+                </div>
+              )}
+
+              {!isGeneratingPlan && errorMessage && !planResult && (
+                <div style={{ textAlign: 'center', padding: '40px 20px' }}>
+                  <AlertCircle size={36} color="#DC2626" style={{ margin: '0 auto 14px auto' }} />
+                  <h4 style={{ fontSize: '16px', fontWeight: 800, color: 'var(--ag-color-text-primary)', margin: '0 0 8px 0' }}>
+                    {currentLang === 'te' ? 'ఉత్పత్తి ప్రణాళికను సిద్ధం చేయలేకపోయాము' : (currentLang === 'hi' ? 'उत्पादन योजना तैयार नहीं हो सकी' : "We couldn't prepare your production plan right now.")}
+                  </h4>
+                  <p style={{ fontSize: '13px', color: 'var(--ag-color-text-secondary)', margin: '0 0 16px 0' }}>
+                    {currentLang === 'te' ? 'దయచేసి కాసేపటి తర్వాత మళ్లీ ప్రయత్నించండి.' : (currentLang === 'hi' ? 'कृपया कुछ समय बाद पुनः प्रयास करें।' : 'Please try again.')}
+                  </p>
+                  {selectedCrop && (
+                    <button
+                      type="button"
+                      onClick={() => handleSelectCropAndGeneratePlan(selectedCrop)}
+                      style={{
+                        backgroundColor: 'var(--ag-color-primary-base)',
+                        color: '#FFFFFF',
+                        border: 'none',
+                        padding: '10px 20px',
+                        borderRadius: 'var(--ag-radius-full)',
+                        fontWeight: 700,
+                        fontSize: '13px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {currentLang === 'te' ? 'మళ్లీ ప్రయత్నించండి' : (currentLang === 'hi' ? 'पुनः प्रयास करें' : 'Try Again')}
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -1160,15 +1608,15 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   }}>
                     <div>
                       <span style={{ fontSize: '11px', fontWeight: 800, color: 'var(--ag-color-primary-dark)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                        Crop Strategy Summary
+                        {WIZARD_STRINGS.step4.cropStrategySummary[currentLang]}
                       </span>
                       <p style={{ margin: '4px 0 0 0', fontSize: '14px', fontWeight: 700, color: 'var(--ag-color-text-primary)', lineHeight: 1.4 }}>
-                        {planResult.summary}
+                        {localizePlanSummary(planResult.summary, selectedCrop?.cropName || '', plannedAcres, farmName, currentLang)}
                       </p>
                     </div>
                     <button
                       type="button"
-                      onClick={() => toggleSpeakSection('plan_summary', planResult.summary)}
+                      onClick={() => toggleSpeakSection('plan_summary', localizePlanSummary(planResult.summary, selectedCrop?.cropName || '', plannedAcres, farmName, currentLang))}
                       style={{
                         backgroundColor: '#FFFFFF',
                         border: '1px solid #A3D9A5',
@@ -1185,7 +1633,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                       }}
                     >
                       <Volume2 size={15} />
-                      <span>{activeSpeechSection === 'plan_summary' ? 'Stop' : 'Listen'}</span>
+                      <span>{activeSpeechSection === 'plan_summary' ? WIZARD_STRINGS.step3.stop[currentLang] : WIZARD_STRINGS.step3.listen[currentLang]}</span>
                     </button>
                   </div>
 
@@ -1198,37 +1646,37 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   }}>
                     <div style={{ backgroundColor: '#FAFBF7', border: '1px solid var(--ag-border-default)', borderRadius: '12px', padding: '14px' }}>
                       <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase' }}>
-                        Est. Total Investment
+                        {WIZARD_STRINGS.step4.estTotalInvestment[currentLang]}
                       </span>
                       <div style={{ fontSize: '18px', fontWeight: 900, color: 'var(--ag-color-text-primary)', margin: '4px 0 2px 0' }}>
                         ₹{planResult.estimatedInvestment.totalMin.toLocaleString('en-IN')} - ₹{planResult.estimatedInvestment.totalMax.toLocaleString('en-IN')}
                       </div>
                       <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)' }}>
-                        ₹{planResult.estimatedInvestment.minPerAcre.toLocaleString('en-IN')} - ₹{planResult.estimatedInvestment.maxPerAcre.toLocaleString('en-IN')}/ac
+                        ₹{planResult.estimatedInvestment.minPerAcre.toLocaleString('en-IN')} - ₹{planResult.estimatedInvestment.maxPerAcre.toLocaleString('en-IN')}{WIZARD_STRINGS.step3.perAcre[currentLang]}
                       </span>
                     </div>
 
                     <div style={{ backgroundColor: '#FAFBF7', border: '1px solid var(--ag-border-default)', borderRadius: '12px', padding: '14px' }}>
                       <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase' }}>
-                        Expected Total Yield
+                        {WIZARD_STRINGS.step4.expectedTotalYield[currentLang]}
                       </span>
                       <div style={{ fontSize: '18px', fontWeight: 900, color: 'var(--ag-color-text-primary)', margin: '4px 0 2px 0' }}>
-                        {planResult.expectedYield.expectedTotalQuintalsMin} - {planResult.expectedYield.expectedTotalQuintalsMax} Quintals
+                        {planResult.expectedYield.expectedTotalQuintalsMin} - {planResult.expectedYield.expectedTotalQuintalsMax} {WIZARD_STRINGS.step4.quintals[currentLang]}
                       </div>
                       <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)' }}>
-                        {planResult.expectedYield.minQuintalsPerAcre} - {planResult.expectedYield.maxQuintalsPerAcre} Q/ac (Estimate)
+                        {planResult.expectedYield.minQuintalsPerAcre} - {planResult.expectedYield.maxQuintalsPerAcre} {WIZARD_STRINGS.step3.qPerAcreEst[currentLang]}
                       </span>
                     </div>
 
                     <div style={{ backgroundColor: '#FAFBF7', border: '1px solid var(--ag-border-default)', borderRadius: '12px', padding: '14px' }}>
                       <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', textTransform: 'uppercase' }}>
-                        Est. Net Margin Range
+                        {WIZARD_STRINGS.step4.estNetMarginRange[currentLang]}
                       </span>
                       <div style={{ fontSize: '18px', fontWeight: 900, color: 'var(--ag-color-primary-base)', margin: '4px 0 2px 0' }}>
                         ₹{planResult.estimatedRevenueAndMargin.estimatedNetMarginMin.toLocaleString('en-IN')} - ₹{planResult.estimatedRevenueAndMargin.estimatedNetMarginMax.toLocaleString('en-IN')}
                       </div>
                       <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)' }}>
-                        Not guaranteed · Benchmark grounded
+                        {WIZARD_STRINGS.step4.notGuaranteedBenchmark[currentLang]}
                       </span>
                     </div>
                   </div>
@@ -1237,12 +1685,15 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   <div style={{ marginBottom: '18px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                       <h4 style={{ margin: 0, fontSize: '15px', fontWeight: 800, color: 'var(--ag-color-text-primary)' }}>
-                        Initial Management Actions (Schedule)
+                        {WIZARD_STRINGS.step4.initialManagementActions[currentLang]}
                       </h4>
                       <button
                         type="button"
                         onClick={() => {
-                          const stepsText = planResult.initialCropManagementPlan.map(s => `${s.timing}: ${s.title}. ${s.actionDetails}`).join('. ');
+                          const stepsText = planResult.initialCropManagementPlan.map(s => {
+                            const loc = localizeMilestoneStep(s, currentLang);
+                            return `${loc.timing}: ${loc.title}. ${loc.actionDetails}`;
+                          }).join('. ');
                           toggleSpeakSection('schedule', stepsText);
                         }}
                         style={{
@@ -1258,64 +1709,67 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                         }}
                       >
                         <Volume2 size={14} />
-                        <span>Listen to schedule</span>
+                        <span>{WIZARD_STRINGS.step4.listenToSchedule[currentLang]}</span>
                       </button>
                     </div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {planResult.initialCropManagementPlan.map((step, sIdx) => (
-                        <div
-                          key={sIdx}
-                          style={{
-                            backgroundColor: '#FFFFFF',
-                            border: '1px solid var(--ag-border-default)',
-                            borderRadius: '12px',
-                            padding: '12px 14px',
-                            display: 'flex',
-                            gap: '12px',
-                            alignItems: 'flex-start',
-                          }}
-                        >
-                          <div style={{
-                            width: '26px',
-                            height: '26px',
-                            borderRadius: '50%',
-                            backgroundColor: 'var(--ag-color-primary-light)',
-                            color: 'var(--ag-color-primary-dark)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: '12px',
-                            fontWeight: 800,
-                            flexShrink: 0,
-                          }}>
-                            {step.stepNumber || sIdx + 1}
-                          </div>
-                          <div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <strong style={{ fontSize: '13px', color: 'var(--ag-color-text-primary)' }}>
-                                {step.title}
-                              </strong>
-                              <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)', backgroundColor: '#F3F4F6', padding: '1px 6px', borderRadius: '4px' }}>
-                                {step.timing}
-                              </span>
+                      {planResult.initialCropManagementPlan.map((rawStep, sIdx) => {
+                        const step = localizeMilestoneStep(rawStep, currentLang);
+                        return (
+                          <div
+                            key={sIdx}
+                            style={{
+                              backgroundColor: '#FFFFFF',
+                              border: '1px solid var(--ag-border-default)',
+                              borderRadius: '12px',
+                              padding: '12px 14px',
+                              display: 'flex',
+                              gap: '12px',
+                              alignItems: 'flex-start',
+                            }}
+                          >
+                            <div style={{
+                              width: '26px',
+                              height: '26px',
+                              borderRadius: '50%',
+                              backgroundColor: 'var(--ag-color-primary-light)',
+                              color: 'var(--ag-color-primary-dark)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '12px',
+                              fontWeight: 800,
+                              flexShrink: 0,
+                            }}>
+                              {rawStep.stepNumber || sIdx + 1}
                             </div>
-                            <p style={{ margin: '3px 0 0 0', fontSize: '12px', color: 'var(--ag-color-text-secondary)', lineHeight: 1.4 }}>
-                              {step.actionDetails}
-                            </p>
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <strong style={{ fontSize: '13px', color: 'var(--ag-color-text-primary)' }}>
+                                  {step.title}
+                                </strong>
+                                <span style={{ fontSize: '11px', color: 'var(--ag-color-text-secondary)', backgroundColor: '#F3F4F6', padding: '1px 6px', borderRadius: '4px' }}>
+                                  {step.timing}
+                                </span>
+                              </div>
+                              <p style={{ margin: '3px 0 0 0', fontSize: '12px', color: 'var(--ag-color-text-secondary)', lineHeight: 1.4 }}>
+                                {step.actionDetails}
+                              </p>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
 
-                  {/* Disclaimers & Provenance */}
-                  <div style={{ backgroundColor: '#FAFBF7', padding: '12px', borderRadius: '10px', border: '1px solid var(--ag-border-default)', fontSize: '11px', color: 'var(--ag-color-text-secondary)', lineHeight: 1.5 }}>
-                    <p style={{ margin: '0 0 4px 0' }}>
-                      <strong>Data Provenance:</strong> Mandi Price: {planResult.estimatedRevenueAndMargin.mandiPriceSource} · Yield Benchmark: {planResult.expectedYield.benchmarkSource}
+                  {/* Guidance Basis & Agronomic Notes */}
+                  <div style={{ backgroundColor: '#FAFBF7', padding: '12px 14px', borderRadius: '10px', border: '1px solid var(--ag-border-default)', fontSize: '11px', color: 'var(--ag-color-text-secondary)', lineHeight: 1.5 }}>
+                    <p style={{ margin: '0 0 4px 0', color: 'var(--ag-color-text-primary)' }}>
+                      <strong>{WIZARD_STRINGS.step4.guidanceBasis[currentLang]}</strong> {planResult.estimatedRevenueAndMargin.mandiPriceSource ? `${WIZARD_STRINGS.step4.mandi[currentLang]} ${planResult.estimatedRevenueAndMargin.mandiPriceSource} · ` : ''}{WIZARD_STRINGS.step4.yieldBenchmark[currentLang]} {localizeBenchmarkSource(planResult.expectedYield.benchmarkSource || '', currentLang)}
                     </p>
                     <p style={{ margin: 0, fontStyle: 'italic' }}>
-                      {planResult.estimatedRevenueAndMargin.marginNote}
+                      {localizeMarginNote(planResult.estimatedRevenueAndMargin.marginNote, currentLang)}
                     </p>
                   </div>
                 </div>
@@ -1355,7 +1809,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
               }}
             >
               <ArrowLeft size={16} />
-              <span>Back</span>
+              <span>{WIZARD_STRINGS.step2.back[currentLang]}</span>
             </button>
           )}
 
@@ -1382,7 +1836,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   boxShadow: 'var(--ag-shadow-button)',
                 }}
               >
-                <span>Continue to Field Info</span>
+                <span>{WIZARD_STRINGS.step1.continueToField[currentLang]}</span>
                 <ArrowRight size={16} />
               </button>
             )}
@@ -1408,7 +1862,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                 }}
               >
                 <Sparkles size={16} />
-                <span>What Can I Grow Here?</span>
+                <span>{WIZARD_STRINGS.step2.whatCanIGrow[currentLang]}</span>
               </button>
             )}
 
@@ -1433,7 +1887,7 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                   boxShadow: 'var(--ag-shadow-button)',
                 }}
               >
-                <span>Generate {selectedCrop.cropName} Plan</span>
+                <span>{WIZARD_STRINGS.step3.generateCropPlan[currentLang](localizeCropName(selectedCrop.cropName, currentLang))}</span>
                 <ArrowRight size={16} />
               </button>
             )}
@@ -1460,12 +1914,32 @@ export const PlanCropWizard: React.FC<PlanCropWizardProps> = ({
                 }}
               >
                 <Sprout size={18} />
-                <span>{isStartingCrop ? 'Starting Crop...' : '[ Start this crop ]'}</span>
+                <span>{isStartingCrop ? WIZARD_STRINGS.step4.startingCrop[currentLang] : WIZARD_STRINGS.step4.startThisCrop[currentLang]}</span>
               </button>
             )}
           </div>
         </div>
       </div>
+
+      {/* Interactive OpenStreetMap + Leaflet Map Location Picker */}
+      <LocationPickerModal
+        isOpen={showLocationMapModal}
+        onClose={() => setShowLocationMapModal(false)}
+        currentLocation={{
+          district: farmDistrict,
+          state: farmState,
+          village: farmVillage,
+          latitude: location.latitude || 17.9689,
+          longitude: location.longitude || 79.5941,
+          source: 'manual',
+        }}
+        onLocationSelected={(newLoc) => {
+          setFarmDistrict(newLoc.district);
+          setFarmState(newLoc.state);
+          setFarmVillage(newLoc.village || newLoc.mandal || '');
+        }}
+        currentLang={currentLang}
+      />
     </div>
   );
 };

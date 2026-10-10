@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { MarketPrice, Language } from '../../types';
 import { translations } from '../../i18n/translations';
+import { localizeCropName } from '../../i18n/agriLocalization';
 import { TrendingUp, TrendingDown, Minus, Store, AlertCircle } from 'lucide-react';
 
 interface MandiPriceCardProps {
@@ -8,6 +9,7 @@ interface MandiPriceCardProps {
   loading: boolean;
   error: string | null;
   currentLang: Language;
+  onNavigateMandi?: () => void;
   style?: React.CSSProperties;
 }
 
@@ -16,11 +18,16 @@ export const MandiPriceCard: React.FC<MandiPriceCardProps> = ({
   loading,
   error,
   currentLang,
+  onNavigateMandi,
   style,
 }) => {
   const t = translations[currentLang];
+  const uniqueCommodities = Array.from(
+    new Set(markets.map(m => m.commodity).filter(Boolean))
+  );
+
   const [selectedCommodity, setSelectedCommodity] = useState<string>(
-    markets.length > 0 ? markets[0].commodity : 'Cotton'
+    uniqueCommodities.length > 0 ? uniqueCommodities[0] : (markets[0]?.commodity || 'Cotton')
   );
 
   if (loading) {
@@ -65,7 +72,11 @@ export const MandiPriceCard: React.FC<MandiPriceCardProps> = ({
     );
   }
 
-  const activeMarket = markets.find(m => m.commodity === selectedCommodity) || markets[0];
+  const currentCommodity = uniqueCommodities.includes(selectedCommodity) 
+    ? selectedCommodity 
+    : (uniqueCommodities[0] || markets[0]?.commodity || 'Cotton');
+
+  const activeMarket = markets.find(m => m.commodity === currentCommodity) || markets[0];
 
   const getActionBadge = (rec: MarketPrice['actionRecommendation']) => {
     switch (rec) {
@@ -117,51 +128,73 @@ export const MandiPriceCard: React.FC<MandiPriceCardProps> = ({
         display: 'flex',
         flexDirection: 'column',
         justifyContent: 'space-between',
+        overflow: 'hidden',
       }}>
         <div>
           {/* Header & Commodity Selector Pills */}
           <div style={{
             display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: '12px',
+            flexDirection: 'column',
+            gap: '10px',
+            marginBottom: '14px',
           }}>
-            <h3 
-              id="mandi-snapshot-heading"
-              style={{
-                fontSize: '12px',
-                fontWeight: 700,
-                color: 'var(--ag-color-text-secondary)',
-                letterSpacing: '0.04em',
-                textTransform: 'uppercase',
-              }}
-            >
-              {t.mandiTitle}
-            </h3>
-
-            <div style={{ display: 'flex', gap: '6px' }}>
-              {markets.map((m) => {
-                const isSelected = m.commodity === activeMarket.commodity;
-                return (
-                  <button
-                    key={m.commodity}
-                    onClick={() => setSelectedCommodity(m.commodity)}
-                    style={{
-                      padding: '4px 10px',
-                      fontSize: '12px',
-                      fontWeight: isSelected ? 700 : 500,
-                      borderRadius: 'var(--ag-radius-full)',
-                      border: isSelected ? '1px solid var(--ag-color-primary-base)' : '1px solid var(--ag-border-default)',
-                      backgroundColor: isSelected ? 'var(--ag-color-primary-light)' : 'transparent',
-                      color: isSelected ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-secondary)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {m.commodity}
-                  </button>
-                );
-              })}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}>
+              <h3 
+                id="mandi-snapshot-heading"
+                style={{
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  color: 'var(--ag-color-text-secondary)',
+                  letterSpacing: '0.04em',
+                  textTransform: 'uppercase',
+                  margin: 0,
+                }}
+              >
+                {t.mandiTitle}
+              </h3>
             </div>
+
+            {uniqueCommodities.length > 1 && (
+              <div style={{
+                display: 'flex',
+                gap: '6px',
+                overflowX: 'auto',
+                paddingBottom: '4px',
+                maxWidth: '100%',
+                WebkitOverflowScrolling: 'touch',
+                scrollbarWidth: 'none',
+              }}>
+                {uniqueCommodities.map((commodity) => {
+                  const isSelected = commodity === currentCommodity;
+                  return (
+                    <button
+                      key={commodity}
+                      type="button"
+                      onClick={() => setSelectedCommodity(commodity)}
+                      style={{
+                        padding: '4px 12px',
+                        fontSize: '12px',
+                        fontWeight: isSelected ? 700 : 500,
+                        borderRadius: 'var(--ag-radius-full)',
+                        border: isSelected ? '1px solid var(--ag-color-primary-base)' : '1px solid var(--ag-border-default)',
+                        backgroundColor: isSelected ? 'var(--ag-color-primary-light)' : '#FFFFFF',
+                        color: isSelected ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-secondary)',
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap',
+                        flexShrink: 0,
+                        transition: 'all 0.15s ease',
+                      }}
+                    >
+                      {localizeCropName(commodity, currentLang)}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Mandi Name & Variety */}
@@ -202,7 +235,7 @@ export const MandiPriceCard: React.FC<MandiPriceCardProps> = ({
                 </span>
               </div>
               <div style={{ fontSize: '12px', color: 'var(--ag-color-text-secondary)', marginTop: '2px' }}>
-                Range: ₹{activeMarket.minPrice.toLocaleString('en-IN')} – ₹{activeMarket.maxPrice.toLocaleString('en-IN')}
+                {t.mandiPriceRange} ₹{activeMarket.minPrice.toLocaleString('en-IN')} – ₹{activeMarket.maxPrice.toLocaleString('en-IN')}
               </div>
             </div>
 
@@ -250,7 +283,7 @@ export const MandiPriceCard: React.FC<MandiPriceCardProps> = ({
             lineHeight: 1.4,
             marginBottom: '10px',
           }}>
-            <strong>Advice:</strong> {activeMarket.actionReason}
+            <strong>{t.mandiAdviceLabel}</strong> {activeMarket.actionReason}
           </p>
         </div>
 
@@ -266,7 +299,27 @@ export const MandiPriceCard: React.FC<MandiPriceCardProps> = ({
           marginTop: '6px',
         }}>
           <span>{t.sourcePrefix} {activeMarket.source}</span>
-          <span>{activeMarket.date}</span>
+          {onNavigateMandi ? (
+            <button
+              onClick={onNavigateMandi}
+              style={{
+                backgroundColor: 'transparent',
+                border: 'none',
+                color: 'var(--ag-color-primary-dark)',
+                fontWeight: 700,
+                fontSize: '11px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '2px',
+                padding: 0,
+              }}
+            >
+              <span>{t.compareMarkets} →</span>
+            </button>
+          ) : (
+            <span>{activeMarket.date}</span>
+          )}
         </div>
       </div>
     </section>

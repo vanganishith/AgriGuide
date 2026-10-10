@@ -1,6 +1,7 @@
 import React from 'react';
 import type { WeatherData, MarketPrice, CropHealth, Language } from '../../types';
 import { translations } from '../../i18n/translations';
+import { localizeCropName } from '../../i18n/agriLocalization';
 import { CloudSun, Store, Stethoscope, ChevronRight, TrendingUp, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 interface TodayAtAGlanceProps {
@@ -292,7 +293,7 @@ export const TodayAtAGlance: React.FC<TodayAtAGlanceProps> = ({
                 {t.cropHealthTitle}
               </span>
               <span style={{ fontSize: '10px', color: 'var(--ag-color-text-secondary)' }}>
-                {crops.length} Plots Tracked
+                {crops.length} {t.plotsTracked}
               </span>
             </div>
 
@@ -324,7 +325,7 @@ export const TodayAtAGlance: React.FC<TodayAtAGlanceProps> = ({
               lineHeight: 1.35,
               marginBottom: '10px',
             }}>
-              {hasCropIssue ? `${underWatchCrop?.cropName}: ${t.cropStatusWatchSummary}` : t.cropStatusHealthySummary}
+              {hasCropIssue ? `${localizeCropName(underWatchCrop?.cropName || '', currentLang)}: ${t.cropStatusWatchSummary}` : t.cropStatusHealthySummary}
             </p>
           </div>
 

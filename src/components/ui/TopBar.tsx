@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import type { Language, LocationContext } from '../../types';
 import { translations } from '../../i18n/translations';
-import { AGRICULTURAL_DISTRICTS } from '../../services/location/locationService';
-import { MapPin, WifiOff, Check, ChevronDown, User } from 'lucide-react';
+import { localizeLocation } from '../../i18n/agriLocalization';
+import { MapPin, WifiOff, ChevronDown, User } from 'lucide-react';
+import { LocationPickerModal } from '../location/LocationPickerModal';
 
 interface TopBarProps {
   currentLang: Language;
@@ -26,7 +27,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onOpenLogin,
 }) => {
   const t = translations[currentLang];
-  const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [showLocationModal, setShowLocationModal] = useState(false);
 
   return (
     <header style={{
@@ -64,7 +65,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
           }}>
-            {farmerProfile?.fullName ? `Namaste, ${farmerProfile.fullName}` : t.greeting}
+            {farmerProfile?.fullName 
+              ? (currentLang === 'te' ? `నమస్కారం, ${farmerProfile.fullName} గారు` : currentLang === 'hi' ? `नमस्ते, ${farmerProfile.fullName} जी` : `Namaste, ${farmerProfile.fullName}`)
+              : t.greeting}
           </h1>
           <p style={{
             fontSize: '12px',
@@ -93,7 +96,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           }}>
             {(['en', 'te', 'hi'] as Language[]).map((lang) => {
               const isActive = currentLang === lang;
-              const labels = { en: 'EN', te: 'తె', hi: 'हि' };
+              const labels = { en: 'EN', te: 'తె', hi: 'హి' };
               return (
                 <button
                   key={lang}
@@ -152,9 +155,9 @@ export const TopBar: React.FC<TopBarProps> = ({
         gap: '8px',
         minWidth: 0,
       }}>
-        {/* Location Dropdown Trigger */}
+        {/* Location Dropdown Trigger -> Opens OpenStreetMap Location Picker */}
         <button
-          onClick={() => setShowLocationPicker(!showLocationPicker)}
+          onClick={() => setShowLocationModal(true)}
           style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -162,7 +165,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             background: 'none',
             border: 'none',
             color: 'var(--ag-color-primary-dark)',
-            fontWeight: 600,
+            fontWeight: 700,
             cursor: 'pointer',
             padding: '2px 0',
             fontSize: '12px',
@@ -175,9 +178,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-            maxWidth: '180px',
+            maxWidth: '220px',
           }}>
-            {location.district}, {location.state}
+            {localizeLocation(location.district, location.state, currentLang, location.village)}
           </span>
           <ChevronDown size={12} style={{ flexShrink: 0 }} />
         </button>
@@ -202,51 +205,14 @@ export const TopBar: React.FC<TopBarProps> = ({
         )}
       </div>
 
-      {/* District Selector Modal / Dropdown */}
-      {showLocationPicker && (
-        <div style={{
-          marginTop: '10px',
-          padding: '12px',
-          backgroundColor: 'var(--ag-color-bg-base)',
-          borderRadius: 'var(--ag-radius-md)',
-          border: '1px solid var(--ag-border-default)',
-        }}>
-          <p style={{ fontSize: '12px', fontWeight: 600, color: 'var(--ag-color-text-secondary)', marginBottom: '8px' }}>
-            Select Agricultural District:
-          </p>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-            {AGRICULTURAL_DISTRICTS.map((d) => {
-              const isSelected = d.district === location.district;
-              return (
-                <button
-                  key={d.district}
-                  onClick={() => {
-                    onLocationChange(d);
-                    setShowLocationPicker(false);
-                  }}
-                  style={{
-                    padding: '8px 10px',
-                    fontSize: '12px',
-                    textAlign: 'left',
-                    borderRadius: 'var(--ag-radius-sm)',
-                    border: isSelected ? '1px solid var(--ag-color-primary-base)' : '1px solid var(--ag-border-default)',
-                    backgroundColor: isSelected ? 'var(--ag-color-primary-light)' : '#FFFFFF',
-                    color: isSelected ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-primary)',
-                    fontWeight: isSelected ? 700 : 500,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                  }}
-                >
-                  <span>{d.district}</span>
-                  {isSelected && <Check size={12} color="var(--ag-color-primary-base)" />}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* Interactive OpenStreetMap + Leaflet Location Picker Modal */}
+      <LocationPickerModal
+        isOpen={showLocationModal}
+        onClose={() => setShowLocationModal(false)}
+        currentLocation={location}
+        onLocationSelected={onLocationChange}
+        currentLang={currentLang}
+      />
     </header>
   );
 };

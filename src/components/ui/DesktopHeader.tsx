@@ -1,19 +1,19 @@
 import React, { useState } from 'react';
 import type { Language, LocationContext, DesktopNavTab } from '../../types';
 import { translations } from '../../i18n/translations';
-import { AGRICULTURAL_DISTRICTS } from '../../services/location/locationService';
+import { localizeLocation } from '../../i18n/agriLocalization';
 import { 
   Sprout, 
   MapPin, 
   WifiOff, 
   User, 
   ChevronDown, 
-  Check, 
   Stethoscope, 
   Store, 
   Landmark, 
   Bell 
 } from 'lucide-react';
+import { LocationPickerModal } from '../location/LocationPickerModal';
 
 export type { DesktopNavTab };
 
@@ -41,7 +41,7 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
   onOpenLogin,
 }) => {
   const t = translations[currentLang];
-  const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [showLocationModal, setShowLocationModal] = useState(false);
 
   const navLinks: { id: DesktopNavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'doctor', label: t.navCropDoctor, icon: <Stethoscope size={15} /> },
@@ -71,7 +71,6 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
         alignItems: 'center',
         justifyContent: 'space-between',
         gap: '12px',
-        flexWrap: 'wrap',
         boxSizing: 'border-box',
       }}>
         {/* Left: Brand Identity (Navigates to Home) */}
@@ -83,60 +82,57 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
           style={{ 
             display: 'flex', 
             alignItems: 'center', 
-            gap: '16px', 
+            gap: '12px', 
             flexShrink: 0,
             cursor: 'pointer',
             userSelect: 'none',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <div style={{
-              width: '36px',
-              height: '36px',
-              borderRadius: 'var(--ag-radius-md)',
-              backgroundColor: 'var(--ag-color-primary-base)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#FFFFFF',
-              boxShadow: '0 2px 6px rgba(47, 125, 50, 0.25)',
-              flexShrink: 0,
-            }}>
-              <Sprout size={20} />
-            </div>
+          <div style={{
+            width: '38px',
+            height: '38px',
+            borderRadius: 'var(--ag-radius-md)',
+            backgroundColor: 'var(--ag-color-primary-base)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#FFFFFF',
+            boxShadow: '0 2px 6px rgba(47, 125, 50, 0.22)',
+            flexShrink: 0,
+          }}>
+            <Sprout size={22} />
+          </div>
 
-            <div>
-              <span style={{
-                fontSize: '18px',
-                fontWeight: 800,
-                color: 'var(--ag-color-text-primary)',
-                letterSpacing: '-0.02em',
-                lineHeight: 1.1,
-                display: 'block',
-              }}>
-                {t.brandName}
-              </span>
-              <span style={{
-                fontSize: '10px',
-                fontWeight: 600,
-                color: 'var(--ag-color-primary-base)',
-                letterSpacing: '0.02em',
-              }}>
-                {t.brandTagline}
-              </span>
-            </div>
+          <div>
+            <span style={{
+              fontSize: '19px',
+              fontWeight: 800,
+              color: 'var(--ag-color-text-primary)',
+              letterSpacing: '-0.02em',
+              lineHeight: 1.15,
+              display: 'block',
+            }}>
+              {t.brandName}
+            </span>
+            <span style={{
+              fontSize: '11px',
+              fontWeight: 600,
+              color: 'var(--ag-color-primary-base)',
+              letterSpacing: '0.01em',
+            }}>
+              {t.brandTagline}
+            </span>
           </div>
         </div>
 
-        {/* Center Navigation Links (Scrollable if narrow, clean buttons) */}
+        {/* Center Navigation Links */}
         <nav 
           aria-label="Desktop Primary Navigation" 
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: '4px',
+            gap: '6px',
             overflowX: 'auto',
-            maxWidth: '100%',
             padding: '4px 0',
           }}
         >
@@ -150,22 +146,22 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  gap: '5px',
-                  padding: '6px 12px',
+                  gap: '6px',
+                  padding: '7px 14px',
                   minHeight: '36px',
                   borderRadius: 'var(--ag-radius-full)',
                   border: 'none',
                   backgroundColor: isActive ? 'var(--ag-color-primary-light)' : 'transparent',
                   color: isActive ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-secondary)',
-                  fontWeight: isActive ? 700 : 500,
-                  fontSize: '13px',
+                  fontWeight: isActive ? 700 : 600,
+                  fontSize: '13.5px',
                   cursor: 'pointer',
                   whiteSpace: 'nowrap',
                   flexShrink: 0,
                   transition: 'all 0.15s ease',
                 }}
               >
-                <span style={{ color: isActive ? 'var(--ag-color-primary-base)' : 'inherit' }}>
+                <span style={{ color: isActive ? 'var(--ag-color-primary-base)' : 'inherit', display: 'flex' }}>
                   {link.icon}
                 </span>
                 <span>{link.label}</span>
@@ -174,7 +170,7 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
           })}
         </nav>
 
-        {/* Right Side: Location, Language, Profile */}
+        {/* Right Side: Location, Language, Profile Symbol */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
           {/* Offline Pill */}
           {isOffline && (
@@ -195,83 +191,30 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
           )}
 
           {/* Location Selector */}
-          <div style={{ position: 'relative' }}>
-            <button
-              onClick={() => setShowLocationPicker(!showLocationPicker)}
-              aria-label="Change farm district"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '4px',
-                backgroundColor: 'var(--ag-color-bg-base)',
-                border: '1px solid var(--ag-border-default)',
-                padding: '6px 10px',
-                borderRadius: 'var(--ag-radius-md)',
-                color: 'var(--ag-color-text-primary)',
-                fontSize: '12px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                maxWidth: '160px',
-              }}
-            >
-              <MapPin size={13} color="var(--ag-color-primary-base)" style={{ flexShrink: 0 }} />
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {location.district}
-              </span>
-              <ChevronDown size={12} color="var(--ag-color-text-secondary)" style={{ flexShrink: 0 }} />
-            </button>
-
-            {showLocationPicker && (
-              <div style={{
-                position: 'absolute',
-                top: '100%',
-                right: 0,
-                marginTop: '6px',
-                width: '240px',
-                backgroundColor: '#FFFFFF',
-                borderRadius: 'var(--ag-radius-md)',
-                boxShadow: 'var(--ag-shadow-elevated)',
-                border: '1px solid var(--ag-border-default)',
-                padding: '8px',
-                zIndex: 60,
-              }}>
-                <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--ag-color-text-secondary)', marginBottom: '6px', padding: '0 4px' }}>
-                  Select District:
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', maxHeight: '200px', overflowY: 'auto' }}>
-                  {AGRICULTURAL_DISTRICTS.map((d) => {
-                    const isSelected = d.district === location.district;
-                    return (
-                      <button
-                        key={d.district}
-                        onClick={() => {
-                          onLocationChange(d);
-                          setShowLocationPicker(false);
-                        }}
-                        style={{
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          padding: '6px 8px',
-                          borderRadius: 'var(--ag-radius-sm)',
-                          border: 'none',
-                          backgroundColor: isSelected ? 'var(--ag-color-primary-light)' : 'transparent',
-                          color: isSelected ? 'var(--ag-color-primary-dark)' : 'var(--ag-color-text-primary)',
-                          fontWeight: isSelected ? 700 : 500,
-                          fontSize: '12px',
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <span>{d.district}, {d.state}</span>
-                        {isSelected && <Check size={13} color="var(--ag-color-primary-base)" />}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
+          <button
+            onClick={() => setShowLocationModal(true)}
+            aria-label="Change farm location on map"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              backgroundColor: 'var(--ag-color-bg-base)',
+              border: '1px solid var(--ag-border-default)',
+              padding: '6px 12px',
+              borderRadius: 'var(--ag-radius-md)',
+              color: 'var(--ag-color-text-primary)',
+              fontSize: '12px',
+              fontWeight: 700,
+              cursor: 'pointer',
+              maxWidth: '180px',
+            }}
+          >
+            <MapPin size={13} color="var(--ag-color-primary-base)" style={{ flexShrink: 0 }} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {localizeLocation(location.district, location.state, currentLang, location.village)}
+            </span>
+            <ChevronDown size={12} color="var(--ag-color-text-secondary)" style={{ flexShrink: 0 }} />
+          </button>
 
           {/* Multilingual Selector */}
           <div style={{
@@ -310,39 +253,40 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
             })}
           </div>
 
-          {/* Farmer Profile Avatar Badge */}
+          {/* Farmer Profile Symbol at the last of navbar */}
           <button 
             onClick={onOpenLogin}
-            aria-label="Farmer profile and mobile confirmation"
+            aria-label="Farmer Profile"
+            title={farmerProfile?.fullName && farmerProfile.fullName !== 'Farmer' ? `${farmerProfile.fullName} (+91 ${farmerProfile.phone})` : (farmerProfile?.phone ? `+91 ${farmerProfile.phone}` : 'Farmer Profile')}
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '4px 10px',
-              backgroundColor: 'var(--ag-color-bg-base)',
-              borderRadius: 'var(--ag-radius-full)',
-              border: '1px solid var(--ag-border-default)',
-              cursor: onOpenLogin ? 'pointer' : 'default',
-            }}
-          >
-            <div style={{
-              width: '24px',
-              height: '24px',
+              width: '34px',
+              height: '34px',
               borderRadius: 'var(--ag-radius-full)',
               backgroundColor: 'var(--ag-color-primary-light)',
+              border: '1px solid var(--ag-border-default)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               color: 'var(--ag-color-primary-base)',
-            }}>
-              <User size={14} />
-            </div>
-            <div style={{ fontSize: '12px', fontWeight: 700, color: 'var(--ag-color-text-primary)', whiteSpace: 'nowrap' }}>
-              {farmerProfile?.phone ? `+91 ${farmerProfile.phone}` : (farmerProfile?.fullName || t.farmerProfile)}
-            </div>
+              cursor: onOpenLogin ? 'pointer' : 'default',
+              padding: 0,
+              flexShrink: 0,
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+            }}
+          >
+            <User size={16} />
           </button>
         </div>
       </div>
+
+      {/* Interactive OpenStreetMap + Leaflet Location Picker Modal */}
+      <LocationPickerModal
+        isOpen={showLocationModal}
+        onClose={() => setShowLocationModal(false)}
+        currentLocation={location}
+        onLocationSelected={onLocationChange}
+        currentLang={currentLang}
+      />
     </header>
   );
 };
